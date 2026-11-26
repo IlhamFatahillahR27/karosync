@@ -14,6 +14,6 @@
     "dev:extension": "npm run dev --workspace=@karosync/extension",
     "build": "npm run build --workspaces",
     "typecheck": "npm run typecheck --workspaces",
-    "test": "npm run test --workspace=@karosync/signaling"
+    "test": "npm run test --workspaces --if-present"
   }
 }

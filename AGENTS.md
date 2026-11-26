@@ -13,4 +13,5 @@
 ## Documentation Maintenance
 
 - Keep the root `README.md` up to date at the end of every phase or significant feature change (monorepo status, setup/dev commands, and protocol/architecture details), and update `docs/roadmap.md` for progress tracking.
+- Defer creating the consolidated manual verification guide (e.g., `docs/manual_verification.md`) until the final phase (Integration, Testing & Deployment), once all interconnected components are complete, detailing prerequisites, full end-to-end test scenarios, expected results, edge cases, and a verification checklist.
 - Never remove `/docs` from `.gitignore`.
