@@ -10,7 +10,7 @@ KaroSync mengubah tab YouTube di browser desktop/TV menjadi panggung karaoke nir
 | :--- | :--- | :--- | :--- |
 | `signaling-server/` | `@karosync/signaling` | Node.js, TypeScript, `ws` | **Fase 1 Selesai** |
 | `client-web/` | `@karosync/client` | Vite, TypeScript, Tailwind CSS v4 | **Fase 2 Selesai** |
-| `extension/` | `@karosync/extension` | Chrome Extension MV3, Vite, TypeScript, Tailwind CSS v4, Side Panel API | Scaffold (Fase 3) |
+| `extension/` | `@karosync/extension` | Chrome Extension MV3, Vite, TypeScript, Tailwind CSS v4, Side Panel API | **Fase 3 Selesai** |
 
 ## Prasyarat
 
@@ -38,7 +38,7 @@ npm run typecheck
 # Build produksi seluruh workspace
 npm run build
 
-# Jalankan automated tests seluruh workspace (signaling-server & client-web)
+# Jalankan automated tests seluruh workspace (signaling-server, client-web, & extension)
 npm test
 ```
 
@@ -105,10 +105,21 @@ Selain jalur audio WebRTC, client membuka `RTCDataChannel` berlabel `karosync-co
 | Host → Client | `HOST_MUTE` | `{ "type": "HOST_MUTE", "muted": true \| false }` |
 | Client → Host | `SELF_MUTE` | `{ "type": "SELF_MUTE", "muted": true \| false }` |
 
-## Memuat Chrome Extension (Development)
+## Chrome Extension Operator (`@karosync/extension`)
+
+Ekstensi Google Chrome Manifest V3 (**KaroSync Operator**) di `extension/` berbasis Chrome Side Panel untuk mengelola room, mencampur audio dari banyak ponsel penyanyi secara *low-latency*, serta mengontrol volume tab YouTube tanpa ter-reset saat berpindah lagu.
+
+### Fitur Utama
+- **Room & QR Code**: Terhubung otomatis ke `@karosync/signaling` (`CREATE_ROOM`), menampilkan kode room 6 karakter, QR Code untuk **KaroSync Mic** (`qrcode`), tombol **Copy Mic Link** & **Salin Kode**, serta panel *Settings* (Signaling Server URL, Mic Client URL, dan opsi parameter `&ws=` di QR).
+- **YouTube Master & Quick Ducking**: Content Script (`*://www.youtube.com/*`) mengontrol `video.volume` (`SET_YT_VOLUME`) dan membaca status tab aktif (`GET_YT_STATUS`) secara otomatis di latar belakang, menjaga volume operator agar tidak ter-reset saat YouTube berpindah lagu (SPA), serta menyediakan **Quick Ducking (30%)** otomatis ketika vokal berbicara/bernyanyi.
+- **Multi-Peer WebRTC Receiver & Web Audio Mixer**: Mengelola banyak `RTCPeerConnection` paralel (`Map<clientId, PeerEntry>`), DataChannel `karosync-control` dua arah (`HOST_MUTE` / `SELF_MUTE`), serta bus **Web Audio API** (`AudioContext({ latencyHint: 'interactive' })`) dengan `MediaStreamAudioSourceNode` → `GainNode` per mic → `AnalyserNode` (VU meter *real-time*) → `Master GainNode` → `DynamicsCompressorNode` (limiter pencegah *clipping*) → speaker/TV.
+- **Active Mics Panel**: Daftar penyanyi terhubung lengkap dengan status koneksi & rute P2P/RTT, VU meter *real-time*, slider volume individu (`0%–150%`), tombol **Mute / Unmute**, dan **Kick**.
+
+### Memuat Chrome Extension (Development)
 
 1. Jalankan `npm run build` (atau `npm run dev:extension` untuk mode watch).
 2. Buka `chrome://extensions` di Google Chrome.
 3. Aktifkan **Developer mode** → klik **Load unpacked** → pilih folder `extension/dist`.
-4. Klik ikon **KaroSync Operator** di toolbar Chrome untuk membuka Side Panel.
+4. Buka tab YouTube, lalu klik ikon **KaroSync Operator** di toolbar Chrome untuk membuka Side Panel.
+5. (Opsional) Atur **Signaling Server URL** (`VITE_SIGNALING_URL`, default `ws://localhost:8080`) dan **Mic Client URL** (`VITE_CLIENT_URL`, default `http://localhost:5173`) melalui tombol pengaturan (ikon gerigi) di Side Panel.
 
