@@ -7,7 +7,8 @@
   "scripts": {
     "dev": "vite build --watch",
     "build": "vite build",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
     "qrcode": "^1.5.4"
@@ -19,6 +20,7 @@
     "@types/qrcode": "^1.5.5",
     "tailwindcss": "^4.0.0",
     "typescript": "^5.8.0",
-    "vite": "^6.0.0"
+    "vite": "^6.0.0",
+    "vitest": "^3.0.0"
   }
 }
