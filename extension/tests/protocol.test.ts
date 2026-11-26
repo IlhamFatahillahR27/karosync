@@ -39,6 +39,14 @@ describe('extension protocol parsers', () => {
       clientId: 'c1',
       reason: 'kicked',
     });
+
+    expect(
+      parseHostServerMessage(JSON.stringify({ type: 'PONG', ts: 1000, serverTime: 1005 })),
+    ).toEqual({
+      type: 'PONG',
+      ts: 1000,
+      serverTime: 1005,
+    });
   });
 
   it('parses valid SIGNAL messages with sdp or candidate', () => {

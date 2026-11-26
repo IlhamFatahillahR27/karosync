@@ -70,6 +70,10 @@ describe('protocol parsers', () => {
         JSON.stringify({ type: 'ERROR', code: 'ROOM_NOT_FOUND', message: 'Not found' }),
       ),
     ).toEqual({ type: 'ERROR', code: 'ROOM_NOT_FOUND', message: 'Not found' });
+
+    expect(
+      parseServerMessage(JSON.stringify({ type: 'PONG', ts: 12345, serverTime: 12350 })),
+    ).toEqual({ type: 'PONG', ts: 12345, serverTime: 12350 });
   });
 
   it('rejects malformed or unknown server messages', () => {

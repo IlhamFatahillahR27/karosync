@@ -49,7 +49,12 @@ export interface SignalMessage {
   candidate?: IceCandidatePayload;
 }
 
-export type ClientToServerMessage = JoinRoomMessage | SignalMessage;
+export interface PingMessage {
+  type: 'PING';
+  ts?: number;
+}
+
+export type ClientToServerMessage = JoinRoomMessage | SignalMessage | PingMessage;
 
 // Signaling Server -> Client messages
 
@@ -86,12 +91,19 @@ export interface ErrorMessage {
   message: string;
 }
 
+export interface PongMessage {
+  type: 'PONG';
+  ts?: number;
+  serverTime: number;
+}
+
 export type ServerToClientMessage =
   | RoomJoinedMessage
   | RelayedSignalMessage
   | KickedMessage
   | RoomClosedMessage
-  | ErrorMessage;
+  | ErrorMessage
+  | PongMessage;
 
 // P2P DataChannel control messages (Host <-> Client)
 
@@ -288,6 +300,23 @@ export function parseServerMessage(rawText: string): ServerToClientMessage | nul
         type: 'ERROR',
         code: parsed.code as ErrorCode,
         message: parsed.message,
+      };
+    }
+
+    case 'PONG': {
+      if (typeof parsed.serverTime !== 'number' || !Number.isFinite(parsed.serverTime)) {
+        return null;
+      }
+      if (
+        parsed.ts !== undefined &&
+        (typeof parsed.ts !== 'number' || !Number.isFinite(parsed.ts))
+      ) {
+        return null;
+      }
+      return {
+        type: 'PONG',
+        ...(parsed.ts !== undefined ? { ts: parsed.ts } : {}),
+        serverTime: parsed.serverTime,
       };
     }
 

@@ -55,6 +55,13 @@ export class RoomManager {
       case 'KICK_CLIENT':
         this.handleKickClient(socket, msg);
         break;
+      case 'PING':
+        this.send(socket, {
+          type: 'PONG',
+          ...(msg.ts !== undefined ? { ts: msg.ts } : {}),
+          serverTime: Date.now(),
+        });
+        break;
     }
   }
 

@@ -223,6 +223,27 @@ export function parseIncomingMessage(rawText: string): ValidationResult<Incoming
       };
     }
 
+    case 'PING': {
+      if (
+        parsed.ts !== undefined &&
+        (typeof parsed.ts !== 'number' || !Number.isFinite(parsed.ts))
+      ) {
+        return {
+          ok: false,
+          code: 'INVALID_PAYLOAD',
+          message: '"ts" must be a finite number when provided.',
+        };
+      }
+
+      return {
+        ok: true,
+        value: {
+          type: 'PING',
+          ...(parsed.ts !== undefined ? { ts: parsed.ts } : {}),
+        },
+      };
+    }
+
     default:
       return {
         ok: false,

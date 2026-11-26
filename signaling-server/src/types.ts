@@ -59,11 +59,17 @@ export interface KickClientMessage {
   reason?: string;
 }
 
+export interface PingMessage {
+  type: 'PING';
+  ts?: number;
+}
+
 export type IncomingMessage =
   | CreateRoomMessage
   | JoinRoomMessage
   | SignalMessage
-  | KickClientMessage;
+  | KickClientMessage
+  | PingMessage;
 
 // Outgoing messages (Server -> Host / Client)
 
@@ -119,6 +125,12 @@ export interface ErrorMessage {
   message: string;
 }
 
+export interface PongMessage {
+  type: 'PONG';
+  ts?: number;
+  serverTime: number;
+}
+
 export type OutgoingMessage =
   | RoomCreatedMessage
   | RoomJoinedMessage
@@ -127,7 +139,8 @@ export type OutgoingMessage =
   | KickedMessage
   | ClientLeftMessage
   | RoomClosedMessage
-  | ErrorMessage;
+  | ErrorMessage
+  | PongMessage;
 
 // Room & socket tracking structures
 

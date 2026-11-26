@@ -82,6 +82,8 @@ curl http://localhost:8080/health
 | Server → Client | `KICKED` | `{ "type": "KICKED", "roomId": "...", "reason": "..." }` (close `4001`) |
 | Server → Host | `CLIENT_LEFT` | `{ "type": "CLIENT_LEFT", "roomId": "...", "clientId": "...", "reason": "disconnected" \| "kicked" }` |
 | Server → Client | `ROOM_CLOSED` | `{ "type": "ROOM_CLOSED", "roomId": "...", "reason": "Host disconnected" }` (close `4002`) |
+| Host / Client → Server | `PING` | `{ "type": "PING", "ts"?: 1700000000000 }` |
+| Server → Sender | `PONG` | `{ "type": "PONG", "ts"?: 1700000000000, "serverTime": 1700000000005 }` |
 | Server → Sender | `ERROR` | `{ "type": "ERROR", "code": "...", "message": "..." }` |
 
 ## Mobile Web Mic Client (`@karosync/client`)
@@ -102,10 +104,9 @@ Lihat template di [client-web/.env.example](./client-web/.env.example).
 | Sumber | Prioritas | Contoh | Deskripsi |
 | :--- | :--- | :--- | :--- |
 | Query `?room=` | 1 | `/?room=K7M2PX` | Kode room otomatis dari QR Code Operator |
-| Query `?ws=` | 1 | `/?room=K7M2PX&ws=wss://sig.example.com` | Override alamat WebSocket Signaling Server |
-| Panel *Server Settings* | 2 | Disimpan di `localStorage` | Override manual opsional di UI join |
-| `VITE_SIGNALING_URL` | 3 | `wss://sig.example.com` | Environment variable saat build produksi |
-| Auto Fallback | 4 | `ws(s)://<hostname>:8080` | Default otomatis mengikuti host halaman |
+| Query `?ws=` | 1 | `/?room=K7M2PX&ws=wss://sig.example.com` | Override alamat WebSocket Signaling Server otomatis dari QR |
+| `VITE_SIGNALING_URL` | 2 | `wss://sig.example.com` | Environment variable saat build produksi |
+| Auto Fallback | 3 | `ws(s)://<hostname>:8080` | Default otomatis mengikuti host halaman |
 
 ### Protokol DataChannel P2P (`karosync-control`)
 
@@ -119,7 +120,7 @@ Lihat template di [client-web/.env.example](./client-web/.env.example).
 Ekstensi Google Chrome Manifest V3 (**KaroSync Operator**) di `extension/` berbasis Chrome Side Panel untuk mengelola room, mencampur audio dari banyak ponsel penyanyi secara *low-latency*, serta mengontrol volume tab YouTube tanpa ter-reset saat berpindah lagu.
 
 ### Fitur Utama
-- **Room & QR Code**: Terhubung ke `@karosync/signaling` (`CREATE_ROOM`), menampilkan kode room 6 karakter, QR Code untuk **KaroSync Mic** (`qrcode`), tombol **Copy Mic Link** & **Salin Kode**, panel *Settings* dengan deteksi *Mixed Content* + tombol cepat proxy `/ws`.
+- **Room, Test Koneksi & QR Code**: Dilengkapi tombol **Test Koneksi Server** (ukur ping WebSocket sebelum membuat room), terhubung ke `@karosync/signaling` (`CREATE_ROOM`), menampilkan kode room 6 karakter, indikator **Ping** server & per-mic P2P, QR Code untuk **KaroSync Mic** (`qrcode`), tombol **Copy Mic Link** & **Salin Kode**, serta panel *Settings* dengan deteksi *Mixed Content* + tombol cepat proxy `/ws`.
 - **YouTube Master & Quick Ducking**: Content Script (`*://www.youtube.com/*`) mengontrol `video.volume` (`SET_YT_VOLUME`) dan status tab aktif (`GET_YT_STATUS`), menahan volume operator agar tidak ter-reset saat YouTube berpindah lagu (SPA), serta **Quick Ducking (30%)** otomatis saat vokal aktif.
 - **Multi-Peer WebRTC Receiver & Web Audio Mixer**: Mengelola banyak `RTCPeerConnection` paralel (`Map<clientId, PeerEntry>`), DataChannel `karosync-control` dua arah (`HOST_MUTE` / `SELF_MUTE`), serta bus **Web Audio API** (`AudioContext({ latencyHint: 'interactive' })`) dengan `MediaStreamAudioSourceNode` → `GainNode` per mic → `AnalyserNode` (VU meter *real-time*) → `Master GainNode` → `DynamicsCompressorNode` → speaker/TV.
 - **Vocal Limiter & HDMI Audio Tuning**: Klik badge **Limiter ON** di panel *Active Mics* untuk menyetel preset secara langsung tanpa memutus vokal (**Balanced `-18 dB / 8:1`** default, **TV Safe `-22 dB / 12:1`** untuk speaker HDMI TV, **Stage `-12 dB / 6:1`**), slider threshold manual (`-36 dB` s.d. `-6 dB`), serta indikator *AudioContext Latency* (`ms`).

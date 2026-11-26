@@ -1,6 +1,5 @@
 import {
   normalizeRoomId,
-  saveSignalingUrl,
   saveSingerName,
 } from './config';
 import type { ConnectionStatus, MicSession, MicSessionState } from './mic-session';
@@ -86,8 +85,6 @@ export class KaroSyncMicUI {
   private readonly roomQrBadge: HTMLElement;
   private readonly roomInput: HTMLInputElement;
   private readonly singerNameInput: HTMLInputElement;
-  private readonly signalingUrlInput: HTMLInputElement;
-  private readonly resetServerBtn: HTMLButtonElement;
   private readonly connectBtn: HTMLButtonElement;
   private readonly errorBox: HTMLElement;
   private readonly errorText: HTMLElement;
@@ -106,6 +103,7 @@ export class KaroSyncMicUI {
   private readonly hostMuteBanner: HTMLElement;
   private readonly wakeLockBadge: HTMLElement;
   private readonly routeBadge: HTMLElement;
+  private readonly pingBadge: HTMLElement;
   private readonly disconnectBtn: HTMLButtonElement;
 
   constructor(options: KaroSyncMicUIOptions) {
@@ -202,35 +200,6 @@ export class KaroSyncMicUI {
                 />
               </div>
 
-              <details class="rounded-2xl border border-slate-800 bg-slate-950/60 px-3.5 py-2.5 text-xs text-slate-400">
-                <summary class="cursor-pointer font-medium text-slate-300 select-none">
-                  Pengaturan Signaling Server (Opsional)
-                </summary>
-                <div class="mt-3 space-y-2">
-                  <label for="signaling-url-input" class="block text-[11px] text-slate-400">
-                    WebSocket URL (<code class="font-mono">ws://</code> atau <code class="font-mono">wss://</code>)
-                  </label>
-                  <input
-                    id="signaling-url-input"
-                    data-el="signaling-url-input"
-                    type="url"
-                    autocomplete="off"
-                    spellcheck="false"
-                    class="w-full rounded-xl border border-slate-700/80 bg-slate-900 px-3 py-2 font-mono text-xs text-slate-100 placeholder:text-slate-500 focus:border-emerald-400 focus:outline-none"
-                  />
-                  <div class="flex items-center justify-between gap-2">
-                    <span class="text-[11px] text-slate-500">Default otomatis mengikuti host / env</span>
-                    <button
-                      type="button"
-                      data-el="reset-server-btn"
-                      class="rounded-lg px-2 py-1 text-[11px] font-medium text-emerald-400 hover:bg-emerald-500/10"
-                    >
-                      Reset Default
-                    </button>
-                  </div>
-                </div>
-              </details>
-
               <button
                 type="submit"
                 data-el="connect-btn"
@@ -302,6 +271,12 @@ export class KaroSyncMicUI {
               >
                 Menghubungkan P2P...
               </span>
+              <span
+                data-el="ping-badge"
+                class="inline-flex items-center gap-1.5 rounded-full border border-slate-700/80 bg-slate-800/80 px-2.5 py-1 font-mono font-medium text-slate-300"
+              >
+                Ping: --
+              </span>
             </div>
           </div>
 
@@ -348,14 +323,6 @@ export class KaroSyncMicUI {
       options.root,
       '[data-el="singer-name-input"]',
     ) as HTMLInputElement;
-    this.signalingUrlInput = this.requireEl(
-      options.root,
-      '[data-el="signaling-url-input"]',
-    ) as HTMLInputElement;
-    this.resetServerBtn = this.requireEl(
-      options.root,
-      '[data-el="reset-server-btn"]',
-    ) as HTMLButtonElement;
     this.connectBtn = this.requireEl(
       options.root,
       '[data-el="connect-btn"]',
@@ -376,6 +343,7 @@ export class KaroSyncMicUI {
     this.hostMuteBanner = this.requireEl(options.root, '[data-el="host-mute-banner"]');
     this.wakeLockBadge = this.requireEl(options.root, '[data-el="wake-lock-badge"]');
     this.routeBadge = this.requireEl(options.root, '[data-el="route-badge"]');
+    this.pingBadge = this.requireEl(options.root, '[data-el="ping-badge"]');
     this.disconnectBtn = this.requireEl(
       options.root,
       '[data-el="disconnect-btn"]',
@@ -401,7 +369,6 @@ export class KaroSyncMicUI {
     // Hydrate initial inputs
     this.roomInput.value = initial.roomId;
     this.singerNameInput.value = initial.clientName;
-    this.signalingUrlInput.value = initial.signalingUrl;
     if (options.initialRoomFromQuery) {
       this.roomQrBadge.classList.remove('hidden');
     }
@@ -429,26 +396,19 @@ export class KaroSyncMicUI {
       }
     });
 
-    this.resetServerBtn.addEventListener('click', () => {
-      this.signalingUrlInput.value = this.defaultSignalingUrl;
-      saveSignalingUrl(null);
-    });
-
     this.joinForm.addEventListener('submit', (event) => {
       event.preventDefault();
       const roomId = normalizeRoomId(this.roomInput.value);
       const clientName = this.singerNameInput.value.trim();
-      const signalingUrl = this.signalingUrlInput.value.trim() || this.defaultSignalingUrl;
 
       this.roomInput.value = roomId;
       saveSingerName(clientName);
-      if (signalingUrl !== this.defaultSignalingUrl) {
-        saveSignalingUrl(signalingUrl);
-      } else {
-        saveSignalingUrl(null);
-      }
 
-      void this.session.connect({ roomId, clientName, signalingUrl });
+      void this.session.connect({
+        roomId,
+        clientName,
+        signalingUrl: this.defaultSignalingUrl,
+      });
     });
 
     this.muteBtn.addEventListener('click', () => {
@@ -550,9 +510,7 @@ export class KaroSyncMicUI {
 
     // WebRTC route badge
     if (state.routeInfo) {
-      const rttLabel =
-        state.routeInfo.rttMs !== null ? ` • ${state.routeInfo.rttMs} ms` : '';
-      this.routeBadge.textContent = `${state.routeInfo.label}${rttLabel}`;
+      this.routeBadge.textContent = state.routeInfo.label;
       this.routeBadge.className =
         state.routeInfo.candidateType === 'host'
           ? 'inline-flex items-center gap-1.5 rounded-full border border-cyan-500/40 bg-cyan-500/10 px-2.5 py-1 font-medium text-cyan-300'
@@ -565,6 +523,25 @@ export class KaroSyncMicUI {
       this.routeBadge.textContent = 'Menghubungkan P2P...';
       this.routeBadge.className =
         'inline-flex items-center gap-1.5 rounded-full border border-slate-700/80 bg-slate-800/80 px-2.5 py-1 font-medium text-slate-400';
+    }
+
+    // Dedicated Ping badge (prefers P2P WebRTC RTT, falls back to Signaling Server ping)
+    const p2pPing = state.routeInfo?.rttMs ?? null;
+    const effectivePing = p2pPing ?? state.serverPingMs;
+    if (effectivePing !== null) {
+      const sourceLabel = p2pPing !== null ? 'P2P' : 'Server';
+      this.pingBadge.textContent = `Ping: ${effectivePing} ms (${sourceLabel})`;
+      const toneClass =
+        effectivePing <= 30
+          ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
+          : effectivePing <= 80
+            ? 'border-amber-500/40 bg-amber-500/10 text-amber-300'
+            : 'border-rose-500/40 bg-rose-500/10 text-rose-300';
+      this.pingBadge.className = `inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 font-mono font-medium ${toneClass}`;
+    } else {
+      this.pingBadge.textContent = 'Ping: --';
+      this.pingBadge.className =
+        'inline-flex items-center gap-1.5 rounded-full border border-slate-700/80 bg-slate-800/80 px-2.5 py-1 font-mono font-medium text-slate-400';
     }
   }
 

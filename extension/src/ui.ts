@@ -128,7 +128,10 @@ export class KaroSyncOperatorUI {
   private readonly lobbyStatusDetail: HTMLElement;
   private readonly lobbyErrorBox: HTMLElement;
   private readonly lobbyErrorText: HTMLElement;
+  private readonly connectionTestBox: HTMLElement;
+  private readonly connectionTestText: HTMLElement;
   private readonly createRoomBtn: HTMLButtonElement;
+  private readonly testConnectionBtn: HTMLButtonElement;
   private readonly activeRoomView: HTMLElement;
 
   // Section 1: Room & QR
@@ -136,6 +139,7 @@ export class KaroSyncOperatorUI {
   private readonly roomErrorText: HTMLElement;
   private readonly qrMixedWarningBox: HTMLElement;
   private readonly qrMixedWarningText: HTMLElement;
+  private readonly operatorPingPill: HTMLElement;
   private readonly roomStatusDetail: HTMLElement;
   private readonly roomCodeText: HTMLElement;
   private readonly copyCodeBtn: HTMLButtonElement;
@@ -307,13 +311,29 @@ export class KaroSyncOperatorUI {
             <p id="lobby-error-text"></p>
           </div>
 
-          <button
-            id="create-room-btn"
-            type="button"
-            class="mt-4 w-full rounded-xl bg-violet-600 px-4 py-2.5 text-xs font-bold text-white shadow-lg shadow-violet-950/50 transition hover:bg-violet-500 active:scale-[0.99] disabled:opacity-60 cursor-pointer"
+          <div
+            id="connection-test-box"
+            class="mt-3 hidden rounded-xl border px-3 py-2 text-left text-xs"
           >
-            Buat Session Room
-          </button>
+            <p id="connection-test-text" class="font-medium"></p>
+          </div>
+
+          <div class="mt-4 flex flex-col gap-2">
+            <button
+              id="create-room-btn"
+              type="button"
+              class="w-full rounded-xl bg-violet-600 px-4 py-2.5 text-xs font-bold text-white shadow-lg shadow-violet-950/50 transition hover:bg-violet-500 active:scale-[0.99] disabled:opacity-60 cursor-pointer"
+            >
+              Buat Session Room
+            </button>
+            <button
+              id="test-connection-btn"
+              type="button"
+              class="w-full rounded-xl border border-slate-700 bg-slate-800/80 px-4 py-2 text-xs font-semibold text-slate-200 transition hover:border-violet-500/60 hover:text-white active:scale-[0.99] disabled:opacity-60 cursor-pointer"
+            >
+              Test Koneksi Server
+            </button>
+          </div>
 
           <p class="mt-3 text-[11px] text-slate-500">
             Ingin ubah alamat Signaling Server atau URL Mic Client? Klik ikon gerigi di kanan atas.
@@ -325,9 +345,17 @@ export class KaroSyncOperatorUI {
           <!-- Section 1: Room & QR Code -->
           <section class="rounded-2xl border border-slate-800 bg-slate-900/80 p-3.5">
             <div class="flex items-center justify-between gap-2">
-              <h2 class="text-xs font-bold tracking-wider text-slate-300 uppercase">
-                1. Room &amp; QR Code
-              </h2>
+              <div class="flex items-center gap-1.5">
+                <h2 class="text-xs font-bold tracking-wider text-slate-300 uppercase">
+                  1. Room &amp; QR Code
+                </h2>
+                <span
+                  id="operator-ping-pill"
+                  class="rounded-full border border-slate-700/80 bg-slate-800/80 px-2 py-0.5 font-mono text-[10px] font-semibold text-slate-300"
+                >
+                  Ping: --
+                </span>
+              </div>
               <button
                 id="exit-room-top-btn"
                 type="button"
@@ -601,13 +629,17 @@ export class KaroSyncOperatorUI {
     this.lobbyStatusDetail = this.requireEl('#lobby-status-detail');
     this.lobbyErrorBox = this.requireEl('#lobby-error-box');
     this.lobbyErrorText = this.requireEl('#lobby-error-text');
+    this.connectionTestBox = this.requireEl('#connection-test-box');
+    this.connectionTestText = this.requireEl('#connection-test-text');
     this.createRoomBtn = this.requireEl('#create-room-btn');
+    this.testConnectionBtn = this.requireEl('#test-connection-btn');
     this.activeRoomView = this.requireEl('#active-room-view');
 
     this.roomErrorBox = this.requireEl('#room-error-box');
     this.roomErrorText = this.requireEl('#room-error-text');
     this.qrMixedWarningBox = this.requireEl('#qr-mixed-warning');
     this.qrMixedWarningText = this.requireEl('#qr-mixed-warning-text');
+    this.operatorPingPill = this.requireEl('#operator-ping-pill');
     this.roomStatusDetail = this.requireEl('#room-status-detail');
     this.roomCodeText = this.requireEl('#room-code-text');
     this.copyCodeBtn = this.requireEl('#copy-code-btn');
@@ -738,6 +770,10 @@ export class KaroSyncOperatorUI {
 
     this.createRoomBtn.addEventListener('click', () => {
       this.session.startRoom();
+    });
+
+    this.testConnectionBtn.addEventListener('click', () => {
+      void this.session.testConnection();
     });
 
     const handleExitRoom = () => {
@@ -871,12 +907,45 @@ export class KaroSyncOperatorUI {
           ? 'Coba Buat Session Room Lagi'
           : 'Buat Session Room';
 
+      const test = state.connectionTest;
+      this.testConnectionBtn.disabled = isConnecting || test.status === 'testing';
+      this.testConnectionBtn.textContent =
+        test.status === 'testing' ? 'Menguji Koneksi...' : 'Test Koneksi Server';
+
+      if (test.status === 'idle' || !test.message) {
+        this.connectionTestBox.classList.add('hidden');
+      } else {
+        this.connectionTestText.textContent = test.message;
+        const tone =
+          test.status === 'ok'
+            ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200'
+            : test.status === 'testing'
+              ? 'border-sky-500/40 bg-sky-500/10 text-sky-200'
+              : 'border-rose-500/40 bg-rose-500/10 text-rose-200';
+        this.connectionTestBox.className = `mt-3 rounded-xl border px-3 py-2 text-left text-xs ${tone}`;
+      }
+
       this.lastRenderedQrUrl = null;
       this.reconcilePeerCards([]);
       return;
     }
 
     // 3. Room & QR section (Live)
+    if (state.serverPingMs !== null) {
+      this.operatorPingPill.textContent = `Ping ${state.serverPingMs} ms`;
+      const tone =
+        state.serverPingMs <= 30
+          ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
+          : state.serverPingMs <= 80
+            ? 'border-amber-500/40 bg-amber-500/10 text-amber-300'
+            : 'border-rose-500/40 bg-rose-500/10 text-rose-300';
+      this.operatorPingPill.className = `rounded-full border px-2 py-0.5 font-mono text-[10px] font-semibold ${tone}`;
+    } else {
+      this.operatorPingPill.textContent = 'Ping: --';
+      this.operatorPingPill.className =
+        'rounded-full border border-slate-700/80 bg-slate-800/80 px-2 py-0.5 font-mono text-[10px] font-semibold text-slate-400';
+    }
+
     this.roomStatusDetail.textContent = state.statusDetail;
     if (state.error) {
       this.roomErrorText.textContent = state.error;
@@ -1087,7 +1156,7 @@ export class KaroSyncOperatorUI {
     if (peer.routeInfo) {
       refs.routeEl.textContent =
         peer.routeInfo.rttMs !== null
-          ? `${peer.routeInfo.label} · ${peer.routeInfo.rttMs} ms`
+          ? `${peer.routeInfo.label} · Ping ${peer.routeInfo.rttMs} ms`
           : peer.routeInfo.label;
     } else {
       refs.routeEl.textContent =

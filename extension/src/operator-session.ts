@@ -22,7 +22,12 @@ import {
   type SavedCompressorConfig,
 } from './config';
 import { QuickDuckingController } from './ducking';
-import { HostSignalingClient, type HostSignalingOptions } from './host-signaling';
+import {
+  HostSignalingClient,
+  testSignalingConnection,
+  type ConnectionTestResult,
+  type HostSignalingOptions,
+} from './host-signaling';
 import type { RelayedSignalMessage, YouTubeActionResponse, YouTubeStatusResponse } from './protocol';
 import {
   WebRtcReceiverManager,
@@ -54,12 +59,22 @@ export interface YouTubePanelState {
   isDucked: boolean;
 }
 
+export type ConnectionTestStatus = 'idle' | 'testing' | 'ok' | 'error';
+
+export interface ConnectionTestState {
+  status: ConnectionTestStatus;
+  pingMs: number | null;
+  message: string | null;
+}
+
 export interface OperatorState {
   roomStatus: RoomStatus;
   statusDetail: string;
   roomId: string | null;
   joinUrl: string | null;
   error: string | null;
+  serverPingMs: number | null;
+  connectionTest: ConnectionTestState;
   audioContextState: AudioContextState;
   audioLatencyMs: number | null;
   compressorPreset: CompressorPresetId;
@@ -114,6 +129,7 @@ export interface OperatorSessionDependencies {
   initialCompressorConfig?: SavedCompressorConfig;
   youtubePollIntervalMs?: number;
   createSignalingClient?: (options: HostSignalingOptions) => HostSignalingLike;
+  testSignalingFn?: (url: string) => Promise<ConnectionTestResult>;
   createWebRtcManager?: (options: WebRtcReceiverManagerOptions) => WebRtcReceiverLike;
   audioMixer?: AudioMixerLike;
   youtubeController?: YouTubeControllerLike;
@@ -126,6 +142,7 @@ const DEFAULT_YT_POLL_INTERVAL_MS = 2500;
 
 export class OperatorSession {
   private readonly createSignalingClient: (options: HostSignalingOptions) => HostSignalingLike;
+  private readonly testSignalingFn: (url: string) => Promise<ConnectionTestResult>;
   private readonly createWebRtcManager: (options: WebRtcReceiverManagerOptions) => WebRtcReceiverLike;
   private readonly audioMixer: AudioMixerLike;
   private readonly youtube: YouTubeControllerLike;
@@ -136,6 +153,7 @@ export class OperatorSession {
   private webrtc: WebRtcReceiverLike | null = null;
   private ytPollTimer: ReturnType<typeof setInterval> | null = null;
   private sessionSeq = 0;
+  private testSeq = 0;
   private hasOperatorSetYtVolume = false;
   private disposed = false;
 
@@ -153,6 +171,7 @@ export class OperatorSession {
 
     this.createSignalingClient =
       deps.createSignalingClient ?? ((options) => new HostSignalingClient(options));
+    this.testSignalingFn = deps.testSignalingFn ?? ((url) => testSignalingConnection(url));
     this.createWebRtcManager =
       deps.createWebRtcManager ?? ((options) => new WebRtcReceiverManager(options));
     this.audioMixer =
@@ -186,6 +205,12 @@ export class OperatorSession {
       roomId: null,
       joinUrl: null,
       error: null,
+      serverPingMs: null,
+      connectionTest: {
+        status: 'idle',
+        pingMs: null,
+        message: null,
+      },
       audioContextState: this.audioMixer.getContextState(),
       audioLatencyMs: this.audioMixer.getOutputLatencyMs?.() ?? null,
       compressorPreset: savedCompressor.preset,
@@ -235,6 +260,51 @@ export class OperatorSession {
     }
   }
 
+  public async testConnection(): Promise<ConnectionTestResult> {
+    if (this.disposed) {
+      return { ok: false, pingMs: null, error: 'Sesi sudah ditutup.' };
+    }
+
+    const url = this.state.settings.signalingUrl.trim();
+    const currentTestSeq = ++this.testSeq;
+
+    this.updateState({
+      connectionTest: {
+        status: 'testing',
+        pingMs: null,
+        message: `Menguji koneksi ke ${url}...`,
+      },
+    });
+
+    const result = await this.testSignalingFn(url);
+    if (this.disposed || currentTestSeq !== this.testSeq) {
+      return result;
+    }
+
+    if (result.ok) {
+      this.updateState({
+        connectionTest: {
+          status: 'ok',
+          pingMs: result.pingMs,
+          message:
+            result.pingMs !== null
+              ? `Terhubung ke Signaling Server • Ping ${result.pingMs} ms`
+              : 'Terhubung ke Signaling Server.',
+        },
+      });
+    } else {
+      this.updateState({
+        connectionTest: {
+          status: 'error',
+          pingMs: null,
+          message: result.error ?? 'Gagal terhubung ke Signaling Server.',
+        },
+      });
+    }
+
+    return result;
+  }
+
   public startRoom(): void {
     if (this.disposed) {
       return;
@@ -265,6 +335,7 @@ export class OperatorSession {
       roomId: null,
       joinUrl: null,
       error: null,
+      serverPingMs: null,
       peers: [],
     });
 
@@ -371,6 +442,13 @@ export class OperatorSession {
           });
         },
 
+        onPingUpdate: (serverPingMs) => {
+          if (currentSeq !== this.sessionSeq) {
+            return;
+          }
+          this.updateState({ serverPingMs });
+        },
+
         onError: (_code, message) => {
           if (currentSeq !== this.sessionSeq) {
             return;
@@ -400,6 +478,7 @@ export class OperatorSession {
             statusDetail: 'Koneksi ke Signaling Server terputus.',
             roomId: null,
             joinUrl: null,
+            serverPingMs: null,
             error: 'Signaling Server terputus. Klik Buat Room Ulang untuk menyambung kembali.',
             peers: [],
           });
@@ -422,6 +501,7 @@ export class OperatorSession {
       statusDetail: 'Siap membuat Session Room baru.',
       roomId: null,
       joinUrl: null,
+      serverPingMs: null,
       error: null,
       peers: [],
     });
@@ -456,9 +536,15 @@ export class OperatorSession {
         })
       : null;
 
+    this.testSeq += 1;
     this.updateState({
       settings: cleaned,
       joinUrl,
+      connectionTest: {
+        status: 'idle',
+        pingMs: null,
+        message: null,
+      },
     });
 
     if (

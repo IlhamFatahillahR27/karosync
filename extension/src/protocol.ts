@@ -50,7 +50,16 @@ export interface KickClientMessage {
   reason?: string;
 }
 
-export type HostToServerMessage = CreateRoomMessage | SignalMessage | KickClientMessage;
+export interface PingMessage {
+  type: 'PING';
+  ts?: number;
+}
+
+export type HostToServerMessage =
+  | CreateRoomMessage
+  | SignalMessage
+  | KickClientMessage
+  | PingMessage;
 
 // Signaling Server -> Host messages
 
@@ -87,12 +96,19 @@ export interface ErrorMessage {
   message: string;
 }
 
+export interface PongMessage {
+  type: 'PONG';
+  ts?: number;
+  serverTime: number;
+}
+
 export type ServerToHostMessage =
   | RoomCreatedMessage
   | ClientJoinedMessage
   | ClientLeftMessage
   | RelayedSignalMessage
-  | ErrorMessage;
+  | ErrorMessage
+  | PongMessage;
 
 // P2P DataChannel control messages (Host <-> Client)
 
@@ -312,6 +328,23 @@ export function parseHostServerMessage(rawText: string): ServerToHostMessage | n
         type: 'ERROR',
         code: parsed.code as ErrorCode,
         message: parsed.message,
+      };
+    }
+
+    case 'PONG': {
+      if (typeof parsed.serverTime !== 'number' || !Number.isFinite(parsed.serverTime)) {
+        return null;
+      }
+      if (
+        parsed.ts !== undefined &&
+        (typeof parsed.ts !== 'number' || !Number.isFinite(parsed.ts))
+      ) {
+        return null;
+      }
+      return {
+        type: 'PONG',
+        ...(parsed.ts !== undefined ? { ts: parsed.ts } : {}),
+        serverTime: parsed.serverTime,
       };
     }
 

@@ -91,6 +91,7 @@ describe('OperatorSession', () => {
         signalingOpts = opts;
         return fakeSignaling;
       },
+      testSignalingFn: vi.fn(async () => ({ ok: true, pingMs: 14, error: null })),
       createWebRtcManager: (opts) => {
         webrtcOpts = opts;
         return fakeWebRtc;
@@ -105,6 +106,13 @@ describe('OperatorSession', () => {
     expect(session.getState().compressor.threshold).toBe(-18);
     expect(session.getState().audioLatencyMs).toBe(18);
 
+    // Pre-room connection test updates state with measured ping
+    const testResult = await session.testConnection();
+    expect(testResult.ok).toBe(true);
+    expect(session.getState().connectionTest.status).toBe('ok');
+    expect(session.getState().connectionTest.pingMs).toBe(14);
+    expect(session.getState().connectionTest.message).toContain('14 ms');
+
     // Tune vocal limiter preset & custom threshold
     session.setCompressorPreset('tv_safe');
     expect(session.getState().compressorPreset).toBe('tv_safe');
@@ -117,8 +125,10 @@ describe('OperatorSession', () => {
 
     session.startRoom();
     signalingOpts!.callbacks.onRoomCreated({ type: 'ROOM_CREATED', roomId: 'K7M2PX' });
+    signalingOpts!.callbacks.onPingUpdate?.(11);
     await Promise.resolve();
     expect(session.getState().roomStatus).toBe('live');
+    expect(session.getState().serverPingMs).toBe(11);
     expect(session.getState().joinUrl).toContain('room=K7M2PX');
     expect(session.getState().youtube.connected).toBe(true);
     expect(session.getState().youtube.targetVolume).toBe(0.8);

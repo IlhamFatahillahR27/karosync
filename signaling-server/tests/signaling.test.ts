@@ -437,6 +437,29 @@ describe('KaroSync Signaling Server (Phase 1)', () => {
     await host.close();
   });
 
+  it('responds to PING with PONG both before and inside a room', async () => {
+    const socket = await TestSocket.connect(wsUrl);
+
+    const ts1 = 1700000000000;
+    socket.send({ type: 'PING', ts: ts1 });
+    const pong1 = await socket.nextMessage();
+    expect(pong1.type).toBe('PONG');
+    if (pong1.type !== 'PONG') throw new Error('Expected PONG');
+    expect(pong1.ts).toBe(ts1);
+    expect(typeof pong1.serverTime).toBe('number');
+
+    socket.send({ type: 'CREATE_ROOM' });
+    const created = await socket.nextMessage();
+    expect(created.type).toBe('ROOM_CREATED');
+
+    const ts2 = 1700000001234;
+    socket.send({ type: 'PING', ts: ts2 });
+    const pong2 = await socket.nextMessage();
+    expect(pong2).toMatchObject({ type: 'PONG', ts: ts2 });
+
+    await socket.close();
+  });
+
   it('enforces allowedOrigins when configured while allowing matching origins and wildcards', async () => {
     const restricted = createSignalingServer({
       host: '127.0.0.1',

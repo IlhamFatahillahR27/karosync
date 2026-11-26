@@ -27,6 +27,7 @@ export interface MicSessionState {
   hostMuted: boolean;
   wakeLockState: WakeLockState;
   routeInfo: RouteInfo | null;
+  serverPingMs: number | null;
   error: string | null;
 }
 
@@ -116,6 +117,7 @@ export class MicSession {
       hostMuted: false,
       wakeLockState: this.wakeLock.getState(),
       routeInfo: null,
+      serverPingMs: null,
       error: null,
     };
   }
@@ -176,6 +178,7 @@ export class MicSession {
       selfMuted: false,
       hostMuted: false,
       routeInfo: null,
+      serverPingMs: null,
       error: null,
     });
 
@@ -311,6 +314,13 @@ export class MicSession {
           );
         },
 
+        onPingUpdate: (serverPingMs) => {
+          if (currentSeq !== this.sessionSeq) {
+            return;
+          }
+          this.updateState({ serverPingMs });
+        },
+
         onError: (_code, message) => {
           if (currentSeq !== this.sessionSeq) {
             return;
@@ -356,6 +366,7 @@ export class MicSession {
       selfMuted: false,
       hostMuted: false,
       routeInfo: null,
+      serverPingMs: null,
       error: null,
     });
   }
@@ -431,6 +442,7 @@ export class MicSession {
       selfMuted: false,
       hostMuted: false,
       routeInfo: null,
+      serverPingMs: null,
       error: errorMessage,
     });
   }

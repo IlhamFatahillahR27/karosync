@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   HostSignalingClient,
   WS_READY_STATE_OPEN,
+  testSignalingConnection,
   type WebSocketLike,
 } from '../src/host-signaling';
 
@@ -123,5 +124,51 @@ describe('HostSignalingClient', () => {
     expect(onError).toHaveBeenCalledWith('TIMEOUT', expect.any(String));
     expect(ws.closed).toBe(true);
     vi.useRealTimers();
+  });
+
+  it('measures server ping via PING/PONG in testSignalingConnection and live sessions', async () => {
+    const testWs = new FakeWebSocket();
+    const promise = testSignalingConnection('ws://localhost:8080', {
+      timeoutMs: 2000,
+      webSocketFactory: () => testWs,
+    });
+
+    testWs.emitOpen();
+    const sentPing = JSON.parse(testWs.sent[0]!) as { type: string; ts: number };
+    expect(sentPing.type).toBe('PING');
+    testWs.emitMessage({ type: 'PONG', ts: sentPing.ts, serverTime: Date.now() });
+
+    const result = await promise;
+    expect(result.ok).toBe(true);
+    expect(result.pingMs).not.toBeNull();
+    expect(testWs.closed).toBe(true);
+
+    // Live HostSignalingClient ping reporting
+    const liveWs = new FakeWebSocket();
+    const onPingUpdate = vi.fn();
+    const client = new HostSignalingClient({
+      url: 'ws://localhost:8080',
+      connectTimeoutMs: 0,
+      pingIntervalMs: 5000,
+      webSocketFactory: () => liveWs,
+      callbacks: {
+        onRoomCreated: vi.fn(),
+        onClientJoined: vi.fn(),
+        onClientLeft: vi.fn(),
+        onSignal: vi.fn(),
+        onPingUpdate,
+        onError: vi.fn(),
+        onClose: vi.fn(),
+      },
+    });
+
+    client.connect();
+    liveWs.emitOpen();
+    liveWs.emitMessage({ type: 'ROOM_CREATED', roomId: 'K7M2PX' });
+    const livePing = JSON.parse(liveWs.sent[1]!) as { type: string; ts: number };
+    expect(livePing.type).toBe('PING');
+    liveWs.emitMessage({ type: 'PONG', ts: livePing.ts, serverTime: Date.now() });
+    expect(onPingUpdate).toHaveBeenCalledWith(expect.any(Number));
+    client.disconnect();
   });
 });

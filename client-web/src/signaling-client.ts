@@ -36,6 +36,7 @@ export interface SignalingClientCallbacks {
   onSignal: (msg: RelayedSignalMessage) => void;
   onKicked: (msg: KickedMessage) => void;
   onRoomClosed: (msg: RoomClosedMessage) => void;
+  onPingUpdate?: (pingMs: number) => void;
   onError: (code: ErrorCode | 'CONNECTION_ERROR' | 'TIMEOUT', message: string) => void;
   onClose: (info: { code: number; reason: string; expected: boolean }) => void;
 }
@@ -45,11 +46,13 @@ export interface SignalingClientOptions {
   roomId: string;
   clientName: string;
   connectTimeoutMs?: number;
+  pingIntervalMs?: number;
   webSocketFactory?: (url: string) => WebSocketLike;
   callbacks: SignalingClientCallbacks;
 }
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
+const DEFAULT_PING_INTERVAL_MS = 5_000;
 
 export function formatSignalingError(code: ErrorCode, fallbackMessage: string): string {
   switch (code) {
@@ -72,6 +75,8 @@ export class SignalingClient {
   private readonly options: SignalingClientOptions;
   private socket: WebSocketLike | null = null;
   private connectTimer: ReturnType<typeof setTimeout> | null = null;
+  private pingTimer: ReturnType<typeof setInterval> | null = null;
+  private lastPingSentAt: number | null = null;
   private closedManually = false;
   private terminalEventReceived = false;
   private joined = false;
@@ -145,7 +150,17 @@ export class SignalingClient {
           this.joined = true;
           this.clearConnectTimer();
           this.options.callbacks.onJoined(msg);
+          this.startPingLoop();
           break;
+
+        case 'PONG': {
+          const sentAt = msg.ts ?? this.lastPingSentAt;
+          if (sentAt !== null && Number.isFinite(sentAt)) {
+            const rtt = Math.max(0, Math.round(Date.now() - sentAt));
+            this.options.callbacks.onPingUpdate?.(rtt);
+          }
+          break;
+        }
 
         case 'SIGNAL':
           this.options.callbacks.onSignal(msg);
@@ -187,6 +202,7 @@ export class SignalingClient {
         return;
       }
       this.clearConnectTimer();
+      this.stopPingLoop();
       this.socket = null;
 
       if (this.terminalEventReceived) {
@@ -237,7 +253,37 @@ export class SignalingClient {
   public disconnect(): void {
     this.closedManually = true;
     this.clearConnectTimer();
+    this.stopPingLoop();
     this.closeSocketSilently(1000, 'Client disconnected');
+  }
+
+  public sendPing(): boolean {
+    const now = Date.now();
+    this.lastPingSentAt = now;
+    return this.sendMessage({ type: 'PING', ts: now });
+  }
+
+  private startPingLoop(): void {
+    if (!this.options.callbacks.onPingUpdate) {
+      return;
+    }
+    const intervalMs = this.options.pingIntervalMs ?? DEFAULT_PING_INTERVAL_MS;
+    if (intervalMs <= 0) {
+      return;
+    }
+    this.stopPingLoop();
+    this.sendPing();
+    this.pingTimer = setInterval(() => {
+      this.sendPing();
+    }, intervalMs);
+  }
+
+  private stopPingLoop(): void {
+    if (this.pingTimer !== null) {
+      clearInterval(this.pingTimer);
+      this.pingTimer = null;
+    }
+    this.lastPingSentAt = null;
   }
 
   private sendMessage(message: ClientToServerMessage): boolean {
