@@ -9,6 +9,7 @@ export interface SignalingServerOptions {
   maxClientsPerRoom?: number;
   heartbeatIntervalMs?: number;
   maxPayloadBytes?: number;
+  allowedOrigins?: string[];
 }
 
 export interface SignalingServerInstance {
@@ -22,6 +23,34 @@ export interface SignalingServerInstance {
 
 const DEFAULT_MAX_PAYLOAD_BYTES = 64 * 1024; // 64 KiB
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 30_000;
+
+export function isOriginAllowed(origin: string | undefined, allowedOrigins: string[]): boolean {
+  if (allowedOrigins.length === 0 || !origin) {
+    return true;
+  }
+
+  const normalizedOrigin = origin.trim().toLowerCase();
+  for (const rawPattern of allowedOrigins) {
+    const pattern = rawPattern.trim().toLowerCase();
+    if (!pattern) {
+      continue;
+    }
+    if (pattern === '*') {
+      return true;
+    }
+    if (pattern.endsWith('*')) {
+      const prefix = pattern.slice(0, -1);
+      if (normalizedOrigin.startsWith(prefix)) {
+        return true;
+      }
+      continue;
+    }
+    if (normalizedOrigin === pattern) {
+      return true;
+    }
+  }
+  return false;
+}
 
 function rawDataToString(data: RawData): string {
   if (typeof data === 'string') {
@@ -43,6 +72,9 @@ export function createSignalingServer(
   const port = options.port ?? 8080;
   const heartbeatIntervalMs = options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
   const maxPayloadBytes = options.maxPayloadBytes ?? DEFAULT_MAX_PAYLOAD_BYTES;
+  const allowedOrigins = (options.allowedOrigins ?? [])
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
 
   const roomManager = new RoomManager({
     maxClientsPerRoom: options.maxClientsPerRoom,
@@ -53,7 +85,7 @@ export function createSignalingServer(
   const httpServer = http.createServer((req: IncomingMessage, res: ServerResponse) => {
     const pathname = new URL(req.url ?? '/', 'http://localhost').pathname;
 
-    if (req.method === 'GET' && pathname === '/health') {
+    if ((req.method === 'GET' || req.method === 'HEAD') && pathname === '/health') {
       const stats = roomManager.getStats(wss.clients.size);
       const body = JSON.stringify({
         status: 'ok',
@@ -63,8 +95,9 @@ export function createSignalingServer(
       res.writeHead(200, {
         'Content-Type': 'application/json; charset=utf-8',
         'Cache-Control': 'no-store',
+        'Access-Control-Allow-Origin': '*',
       });
-      res.end(body);
+      res.end(req.method === 'HEAD' ? undefined : body);
       return;
     }
 
@@ -75,6 +108,13 @@ export function createSignalingServer(
   const wss = new WebSocketServer({
     server: httpServer,
     maxPayload: maxPayloadBytes,
+    verifyClient: (info, callback) => {
+      if (isOriginAllowed(info.origin, allowedOrigins)) {
+        callback(true);
+        return;
+      }
+      callback(false, 403, 'Origin not allowed');
+    },
   });
 
   wss.on('connection', (socket: WebSocket) => {

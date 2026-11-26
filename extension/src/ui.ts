@@ -1,5 +1,14 @@
 import QRCode from 'qrcode';
-import { getDefaultSettings } from './config';
+import {
+  MAX_COMPRESSOR_THRESHOLD_DB,
+  MIN_COMPRESSOR_THRESHOLD_DB,
+  type BuiltInCompressorPresetId,
+} from './audio-mixer';
+import {
+  deriveTunnelSignalingUrl,
+  detectMixedContentQrWarning,
+  getDefaultSettings,
+} from './config';
 import type {
   OperatorSession,
   OperatorState,
@@ -106,6 +115,9 @@ export class KaroSyncOperatorUI {
   private readonly signalingInput: HTMLInputElement;
   private readonly clientUrlInput: HTMLInputElement;
   private readonly includeWsCheckbox: HTMLInputElement;
+  private readonly settingsMixedWarningEl: HTMLElement;
+  private readonly settingsMixedWarningText: HTMLElement;
+  private readonly useTunnelWsBtn: HTMLButtonElement;
   private readonly settingsResetBtn: HTMLButtonElement;
   private readonly settingsErrorEl: HTMLElement;
   private readonly audioBanner: HTMLElement;
@@ -122,6 +134,8 @@ export class KaroSyncOperatorUI {
   // Section 1: Room & QR
   private readonly roomErrorBox: HTMLElement;
   private readonly roomErrorText: HTMLElement;
+  private readonly qrMixedWarningBox: HTMLElement;
+  private readonly qrMixedWarningText: HTMLElement;
   private readonly roomStatusDetail: HTMLElement;
   private readonly roomCodeText: HTMLElement;
   private readonly copyCodeBtn: HTMLButtonElement;
@@ -141,7 +155,12 @@ export class KaroSyncOperatorUI {
 
   // Section 3: Active Mics
   private readonly micCountBadge: HTMLElement;
-  private readonly limiterBadge: HTMLElement;
+  private readonly limiterBadge: HTMLButtonElement;
+  private readonly limiterPanel: HTMLElement;
+  private readonly audioLatencyBadge: HTMLElement;
+  private readonly presetButtons: Map<BuiltInCompressorPresetId, HTMLButtonElement>;
+  private readonly limiterThresholdSlider: HTMLInputElement;
+  private readonly limiterThresholdValue: HTMLElement;
   private readonly masterVocalSlider: HTMLInputElement;
   private readonly masterVocalValue: HTMLElement;
   private readonly micsEmptyState: HTMLElement;
@@ -216,6 +235,19 @@ export class KaroSyncOperatorUI {
                 />
                 Sertakan <code>&amp;ws=</code> di QR Code agar HP otomatis terhubung
               </label>
+              <div
+                id="settings-mixed-warning"
+                class="hidden rounded-xl border border-amber-500/40 bg-amber-500/10 p-2.5 text-[11px] leading-relaxed text-amber-200"
+              >
+                <p id="settings-mixed-warning-text"></p>
+                <button
+                  id="use-tunnel-ws-btn"
+                  type="button"
+                  class="mt-2 hidden rounded-lg border border-amber-400/50 bg-amber-500/20 px-2.5 py-1 text-[10px] font-semibold text-amber-100 hover:bg-amber-500/30 cursor-pointer"
+                >
+                  Pakai Proxy Tunnel (/ws)
+                </button>
+              </div>
               <p id="settings-error" class="hidden text-[11px] text-rose-400"></p>
               <div class="flex items-center justify-end gap-2 pt-0.5">
                 <button
@@ -312,6 +344,13 @@ export class KaroSyncOperatorUI {
               class="mt-2.5 hidden rounded-xl border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-200"
             >
               <p id="room-error-text"></p>
+            </div>
+
+            <div
+              id="qr-mixed-warning"
+              class="mt-2.5 hidden rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] leading-relaxed text-amber-200"
+            >
+              <p id="qr-mixed-warning-text"></p>
             </div>
 
             <!-- Live Room QR Block -->
@@ -427,12 +466,75 @@ export class KaroSyncOperatorUI {
                   0
                 </span>
               </div>
-              <span
+              <button
                 id="limiter-badge"
-                class="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-300"
+                type="button"
+                title="Klik untuk menyetel preset & threshold Limiter HDMI TV"
+                class="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-300 transition hover:border-emerald-400/60 cursor-pointer"
               >
                 Limiter ON
-              </span>
+              </button>
+            </div>
+
+            <!-- Collapsible Vocal Limiter & HDMI Audio Tuning -->
+            <div
+              id="limiter-tuning-panel"
+              class="mt-2.5 hidden rounded-xl border border-slate-800 bg-slate-950/75 p-2.5"
+            >
+              <div class="flex items-center justify-between gap-2">
+                <span class="text-[11px] font-semibold text-slate-200">Vocal Limiter &amp; HDMI Audio</span>
+                <span
+                  id="audio-latency-badge"
+                  class="rounded-md border border-slate-700/80 bg-slate-900 px-1.5 py-0.5 font-mono text-[10px] text-slate-400"
+                >
+                  Latency: --
+                </span>
+              </div>
+
+              <div class="mt-2 grid grid-cols-3 gap-1.5">
+                <button
+                  type="button"
+                  data-compressor-preset="tv_safe"
+                  class="rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-[10px] font-semibold text-slate-300 transition hover:border-violet-500/60 cursor-pointer"
+                >
+                  TV Safe
+                </button>
+                <button
+                  type="button"
+                  data-compressor-preset="balanced"
+                  class="rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-[10px] font-semibold text-slate-300 transition hover:border-violet-500/60 cursor-pointer"
+                >
+                  Balanced
+                </button>
+                <button
+                  type="button"
+                  data-compressor-preset="stage"
+                  class="rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-[10px] font-semibold text-slate-300 transition hover:border-violet-500/60 cursor-pointer"
+                >
+                  Stage
+                </button>
+              </div>
+
+              <div class="mt-2.5">
+                <div class="flex items-center justify-between text-[11px]">
+                  <span class="text-slate-400">Limiter Threshold</span>
+                  <span id="limiter-threshold-value" class="font-mono font-semibold text-violet-300">
+                    -18 dB · 8:1
+                  </span>
+                </div>
+                <input
+                  id="limiter-threshold-slider"
+                  type="range"
+                  min="${MIN_COMPRESSOR_THRESHOLD_DB}"
+                  max="${MAX_COMPRESSOR_THRESHOLD_DB}"
+                  step="1"
+                  value="-18"
+                  class="karo-slider mt-1.5 w-full"
+                />
+                <p class="mt-1 text-[10px] leading-snug text-slate-500">
+                  Pilih <strong>TV Safe (-22 dB)</strong> untuk mencegah vokal pecah atau feedback di speaker TV HDMI.
+                </p>
+              </div>
             </div>
 
             <!-- Master Vocal Bus Slider -->
@@ -487,6 +589,9 @@ export class KaroSyncOperatorUI {
     this.signalingInput = this.requireEl('#signaling-url-input');
     this.clientUrlInput = this.requireEl('#client-url-input');
     this.includeWsCheckbox = this.requireEl('#include-ws-checkbox');
+    this.settingsMixedWarningEl = this.requireEl('#settings-mixed-warning');
+    this.settingsMixedWarningText = this.requireEl('#settings-mixed-warning-text');
+    this.useTunnelWsBtn = this.requireEl('#use-tunnel-ws-btn');
     this.settingsResetBtn = this.requireEl('#settings-reset-btn');
     this.settingsErrorEl = this.requireEl('#settings-error');
     this.audioBanner = this.requireEl('#audio-suspended-banner');
@@ -501,6 +606,8 @@ export class KaroSyncOperatorUI {
 
     this.roomErrorBox = this.requireEl('#room-error-box');
     this.roomErrorText = this.requireEl('#room-error-text');
+    this.qrMixedWarningBox = this.requireEl('#qr-mixed-warning');
+    this.qrMixedWarningText = this.requireEl('#qr-mixed-warning-text');
     this.roomStatusDetail = this.requireEl('#room-status-detail');
     this.roomCodeText = this.requireEl('#room-code-text');
     this.copyCodeBtn = this.requireEl('#copy-code-btn');
@@ -519,6 +626,15 @@ export class KaroSyncOperatorUI {
 
     this.micCountBadge = this.requireEl('#mic-count-badge');
     this.limiterBadge = this.requireEl('#limiter-badge');
+    this.limiterPanel = this.requireEl('#limiter-tuning-panel');
+    this.audioLatencyBadge = this.requireEl('#audio-latency-badge');
+    this.presetButtons = new Map<BuiltInCompressorPresetId, HTMLButtonElement>([
+      ['tv_safe', this.requireEl('[data-compressor-preset="tv_safe"]')],
+      ['balanced', this.requireEl('[data-compressor-preset="balanced"]')],
+      ['stage', this.requireEl('[data-compressor-preset="stage"]')],
+    ]);
+    this.limiterThresholdSlider = this.requireEl('#limiter-threshold-slider');
+    this.limiterThresholdValue = this.requireEl('#limiter-threshold-value');
     this.masterVocalSlider = this.requireEl('#master-vocal-slider');
     this.masterVocalValue = this.requireEl('#master-vocal-value');
     this.micsEmptyState = this.requireEl('#mics-empty-state');
@@ -583,6 +699,37 @@ export class KaroSyncOperatorUI {
       this.clientUrlInput.value = defaults.clientBaseUrl;
       this.includeWsCheckbox.checked = defaults.includeWsInQr;
       this.settingsErrorEl.classList.add('hidden');
+      this.updateSettingsMixedWarning();
+    });
+
+    const handleSettingsDraftChange = () => {
+      this.updateSettingsMixedWarning();
+    };
+    this.signalingInput.addEventListener('input', handleSettingsDraftChange);
+    this.clientUrlInput.addEventListener('input', handleSettingsDraftChange);
+    this.includeWsCheckbox.addEventListener('change', handleSettingsDraftChange);
+
+    this.useTunnelWsBtn.addEventListener('click', () => {
+      const derived = deriveTunnelSignalingUrl(this.clientUrlInput.value);
+      if (derived) {
+        this.signalingInput.value = derived;
+        this.updateSettingsMixedWarning();
+      }
+    });
+
+    this.limiterBadge.addEventListener('click', () => {
+      this.limiterPanel.classList.toggle('hidden');
+    });
+
+    for (const [presetId, button] of this.presetButtons.entries()) {
+      button.addEventListener('click', () => {
+        this.session.setCompressorPreset(presetId);
+      });
+    }
+
+    this.limiterThresholdSlider.addEventListener('input', () => {
+      const thresholdDb = Number(this.limiterThresholdSlider.value);
+      this.session.setCompressorThreshold(thresholdDb);
     });
 
     this.resumeAudioBtn.addEventListener('click', () => {
@@ -662,6 +809,28 @@ export class KaroSyncOperatorUI {
     this.signalingInput.value = state.settings.signalingUrl;
     this.clientUrlInput.value = state.settings.clientBaseUrl;
     this.includeWsCheckbox.checked = state.settings.includeWsInQr;
+    this.updateSettingsMixedWarning();
+  }
+
+  private updateSettingsMixedWarning(): void {
+    const warning = detectMixedContentQrWarning({
+      signalingUrl: this.signalingInput.value,
+      clientBaseUrl: this.clientUrlInput.value,
+      includeWsInQr: this.includeWsCheckbox.checked,
+    });
+    if (!warning) {
+      this.settingsMixedWarningEl.classList.add('hidden');
+      return;
+    }
+    this.settingsMixedWarningText.textContent = warning;
+    this.settingsMixedWarningEl.classList.remove('hidden');
+
+    const derived = deriveTunnelSignalingUrl(this.clientUrlInput.value);
+    const canOfferTunnelBtn = Boolean(derived && derived.startsWith('wss://'));
+    this.useTunnelWsBtn.classList.toggle('hidden', !canOfferTunnelBtn);
+    if (derived) {
+      this.useTunnelWsBtn.textContent = `Pakai Proxy (${derived})`;
+    }
   }
 
   private render(state: OperatorState): void {
@@ -716,6 +885,14 @@ export class KaroSyncOperatorUI {
       this.roomErrorBox.classList.add('hidden');
     }
 
+    const qrWarning = detectMixedContentQrWarning(state.settings);
+    if (qrWarning) {
+      this.qrMixedWarningText.textContent = qrWarning;
+      this.qrMixedWarningBox.classList.remove('hidden');
+    } else {
+      this.qrMixedWarningBox.classList.add('hidden');
+    }
+
     if (state.roomId && state.joinUrl) {
       this.roomCodeText.textContent = state.roomId;
       this.joinUrlPreview.textContent = state.joinUrl;
@@ -751,6 +928,23 @@ export class KaroSyncOperatorUI {
 
     // 4. Active Mics section
     this.micCountBadge.textContent = String(state.peers.length);
+
+    this.audioLatencyBadge.textContent =
+      state.audioLatencyMs !== null ? `Latency: ~${state.audioLatencyMs} ms` : 'Latency: --';
+
+    for (const [presetId, button] of this.presetButtons.entries()) {
+      const active = state.compressorPreset === presetId;
+      button.className = active
+        ? 'rounded-lg border border-violet-500 bg-violet-600/25 px-2 py-1.5 text-[10px] font-bold text-violet-200 transition cursor-pointer'
+        : 'rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-[10px] font-semibold text-slate-300 transition hover:border-violet-500/60 cursor-pointer';
+    }
+
+    const thresholdRounded = Math.round(state.compressor.threshold);
+    if (document.activeElement !== this.limiterThresholdSlider) {
+      this.limiterThresholdSlider.value = String(thresholdRounded);
+    }
+    this.limiterThresholdValue.textContent = `${thresholdRounded} dB · ${Math.round(state.compressor.ratio)}:1`;
+
     const masterPct = Math.round(state.masterVocalVolume * 100);
     if (document.activeElement !== this.masterVocalSlider) {
       this.masterVocalSlider.value = String(masterPct);
@@ -946,11 +1140,11 @@ export class KaroSyncOperatorUI {
         const db = Math.abs(snapshot.compressorReductionDb).toFixed(1);
         this.limiterBadge.textContent = `Limiter -${db} dB`;
         this.limiterBadge.className =
-          'rounded-full border border-amber-500/40 bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold text-amber-300';
+          'rounded-full border border-amber-500/40 bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold text-amber-300 transition hover:border-amber-400/70 cursor-pointer';
       } else {
         this.limiterBadge.textContent = 'Limiter ON';
         this.limiterBadge.className =
-          'rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-300';
+          'rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-300 transition hover:border-emerald-400/60 cursor-pointer';
       }
 
       this.rafId = requestAnimationFrame(tick);

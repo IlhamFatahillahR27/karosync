@@ -8,9 +8,9 @@ KaroSync mengubah tab YouTube di browser desktop/TV menjadi panggung karaoke nir
 
 | Workspace | Package | Stack | Status |
 | :--- | :--- | :--- | :--- |
-| `signaling-server/` | `@karosync/signaling` | Node.js, TypeScript, `ws` | **Fase 1 Selesai** |
-| `client-web/` | `@karosync/client` | Vite, TypeScript, Tailwind CSS v4 | **Fase 2 Selesai** |
-| `extension/` | `@karosync/extension` | Chrome Extension MV3, Vite, TypeScript, Tailwind CSS v4, Side Panel API | **Fase 3 Selesai** |
+| `signaling-server/` | `@karosync/signaling` | Node.js, TypeScript, `ws`, Docker | **Fase 1–4 Selesai** |
+| `client-web/` | `@karosync/client` | Vite, TypeScript, Tailwind CSS v4 | **Fase 1–4 Selesai** |
+| `extension/` | `@karosync/extension` | Chrome Extension MV3, Vite, TypeScript, Tailwind CSS v4, Side Panel API | **Fase 1–4 Selesai** |
 
 ## Prasyarat
 
@@ -26,7 +26,7 @@ npm install
 # Jalankan Signaling Server (dev watch, default port 8080)
 npm run dev:signaling
 
-# Jalankan Mobile Web Mic Client (dev server, default port 5173)
+# Jalankan Mobile Web Mic Client (dev server, default port 5173 + proxy /ws ke 8080)
 npm run dev:client
 
 # Build watch Chrome Extension ke extension/dist
@@ -38,22 +38,30 @@ npm run typecheck
 # Build produksi seluruh workspace
 npm run build
 
-# Jalankan automated tests seluruh workspace (signaling-server, client-web, & extension)
+# Jalankan seluruh automated unit & cross-workspace integration tests
 npm test
+
+# Verifikasi penuh 1 perintah (typecheck + build + test)
+npm run check
 ```
 
 ## Signaling Server (`@karosync/signaling`)
 
 ### Environment Variables
 
+Lihat template di [signaling-server/.env.example](./signaling-server/.env.example).
+
 | Variable | Default | Deskripsi |
 | :--- | :--- | :--- |
 | `HOST` | `0.0.0.0` | Alamat bind server HTTP/WebSocket |
 | `PORT` | `8080` | Port server HTTP/WebSocket |
-| `MAX_CLIENTS_PER_ROOM` | `8` | Batas maksimal mic client per room |
+| `MAX_CLIENTS_PER_ROOM` | `8` | Batas maksimal mic client per room (naikkan mis. ke `12` untuk >8 mic) |
 | `HEARTBEAT_INTERVAL_MS` | `30000` | Interval ping/pong heartbeat WebSocket (ms) |
+| `ALLOWED_ORIGINS` | *(kosong = semua)* | Daftar origin WebSocket yang diizinkan, dipisah koma (mendukung wildcard seperti `chrome-extension://*`) |
 
 ### Health Check
+
+Mendukung `GET /health` dan `HEAD /health` dengan header `Access-Control-Allow-Origin: *`:
 
 ```bash
 curl http://localhost:8080/health
@@ -85,8 +93,11 @@ Aplikasi web *mobile-first* di `client-web/` untuk Android & iOS Safari agar pon
 - **Low-Latency Vocal Capture**: `getUserMedia` dengan `echoCancellation: false`, `noiseSuppression: false`, `autoGainControl: false`, `latency: 0.01` (dengan fallback otomatis bila browser tidak mendukung properti `latency`), serta *local audio visualizer* berbasis `AnalyserNode` (tanpa routing ke speaker lokal).
 - **WebRTC P2P Sender**: `RTCPeerConnection` dengan fallback STUN `stun:stun.l.google.com:19302` (otomatis memprioritaskan kandidat LAN lokal) dan diagnostik jalur/RTT.
 - **Mobile Safeguards**: **Screen Wake Lock API** dengan *auto re-acquire* saat `visibilitychange`, tombol **Self-Mute / Unmute** lokal (`audioTrack.enabled`), serta deteksi *secure context* (HTTPS).
+- **Single-Tunnel Dev Proxy**: `vite.config.ts` mengizinkan host tunnel (`allowedHosts: true`) dan mem-proxy `/ws` + `/health` ke `signaling-server` lokal (`127.0.0.1:8080`).
 
 ### Konfigurasi URL & Environment
+
+Lihat template di [client-web/.env.example](./client-web/.env.example).
 
 | Sumber | Prioritas | Contoh | Deskripsi |
 | :--- | :--- | :--- | :--- |
@@ -98,8 +109,6 @@ Aplikasi web *mobile-first* di `client-web/` untuk Android & iOS Safari agar pon
 
 ### Protokol DataChannel P2P (`karosync-control`)
 
-Selain jalur audio WebRTC, client membuka `RTCDataChannel` berlabel `karosync-control` (dan juga menerima `ondatachannel` dari Host) untuk sinkronisasi status mute langsung P2P:
-
 | Arah | Event `type` | Payload |
 | :--- | :--- | :--- |
 | Host → Client | `HOST_MUTE` | `{ "type": "HOST_MUTE", "muted": true \| false }` |
@@ -110,10 +119,10 @@ Selain jalur audio WebRTC, client membuka `RTCDataChannel` berlabel `karosync-co
 Ekstensi Google Chrome Manifest V3 (**KaroSync Operator**) di `extension/` berbasis Chrome Side Panel untuk mengelola room, mencampur audio dari banyak ponsel penyanyi secara *low-latency*, serta mengontrol volume tab YouTube tanpa ter-reset saat berpindah lagu.
 
 ### Fitur Utama
-- **Room & QR Code**: Terhubung otomatis ke `@karosync/signaling` (`CREATE_ROOM`), menampilkan kode room 6 karakter, QR Code untuk **KaroSync Mic** (`qrcode`), tombol **Copy Mic Link** & **Salin Kode**, serta panel *Settings* (Signaling Server URL, Mic Client URL, dan opsi parameter `&ws=` di QR).
-- **YouTube Master & Quick Ducking**: Content Script (`*://www.youtube.com/*`) mengontrol `video.volume` (`SET_YT_VOLUME`) dan membaca status tab aktif (`GET_YT_STATUS`) secara otomatis di latar belakang, menjaga volume operator agar tidak ter-reset saat YouTube berpindah lagu (SPA), serta menyediakan **Quick Ducking (30%)** otomatis ketika vokal berbicara/bernyanyi.
-- **Multi-Peer WebRTC Receiver & Web Audio Mixer**: Mengelola banyak `RTCPeerConnection` paralel (`Map<clientId, PeerEntry>`), DataChannel `karosync-control` dua arah (`HOST_MUTE` / `SELF_MUTE`), serta bus **Web Audio API** (`AudioContext({ latencyHint: 'interactive' })`) dengan `MediaStreamAudioSourceNode` → `GainNode` per mic → `AnalyserNode` (VU meter *real-time*) → `Master GainNode` → `DynamicsCompressorNode` (limiter pencegah *clipping*) → speaker/TV.
-- **Active Mics Panel**: Daftar penyanyi terhubung lengkap dengan status koneksi & rute P2P/RTT, VU meter *real-time*, slider volume individu (`0%–150%`), tombol **Mute / Unmute**, dan **Kick**.
+- **Room & QR Code**: Terhubung ke `@karosync/signaling` (`CREATE_ROOM`), menampilkan kode room 6 karakter, QR Code untuk **KaroSync Mic** (`qrcode`), tombol **Copy Mic Link** & **Salin Kode**, panel *Settings* dengan deteksi *Mixed Content* + tombol cepat proxy `/ws`.
+- **YouTube Master & Quick Ducking**: Content Script (`*://www.youtube.com/*`) mengontrol `video.volume` (`SET_YT_VOLUME`) dan status tab aktif (`GET_YT_STATUS`), menahan volume operator agar tidak ter-reset saat YouTube berpindah lagu (SPA), serta **Quick Ducking (30%)** otomatis saat vokal aktif.
+- **Multi-Peer WebRTC Receiver & Web Audio Mixer**: Mengelola banyak `RTCPeerConnection` paralel (`Map<clientId, PeerEntry>`), DataChannel `karosync-control` dua arah (`HOST_MUTE` / `SELF_MUTE`), serta bus **Web Audio API** (`AudioContext({ latencyHint: 'interactive' })`) dengan `MediaStreamAudioSourceNode` → `GainNode` per mic → `AnalyserNode` (VU meter *real-time*) → `Master GainNode` → `DynamicsCompressorNode` → speaker/TV.
+- **Vocal Limiter & HDMI Audio Tuning**: Klik badge **Limiter ON** di panel *Active Mics* untuk menyetel preset secara langsung tanpa memutus vokal (**Balanced `-18 dB / 8:1`** default, **TV Safe `-22 dB / 12:1`** untuk speaker HDMI TV, **Stage `-12 dB / 6:1`**), slider threshold manual (`-36 dB` s.d. `-6 dB`), serta indikator *AudioContext Latency* (`ms`).
 
 ### Memuat Chrome Extension (Development)
 
@@ -121,5 +130,38 @@ Ekstensi Google Chrome Manifest V3 (**KaroSync Operator**) di `extension/` berba
 2. Buka `chrome://extensions` di Google Chrome.
 3. Aktifkan **Developer mode** → klik **Load unpacked** → pilih folder `extension/dist`.
 4. Buka tab YouTube, lalu klik ikon **KaroSync Operator** di toolbar Chrome untuk membuka Side Panel.
-5. (Opsional) Atur **Signaling Server URL** (`VITE_SIGNALING_URL`, default `ws://localhost:8080`) dan **Mic Client URL** (`VITE_CLIENT_URL`, default `http://localhost:5173`) melalui tombol pengaturan (ikon gerigi) di Side Panel.
+5. (Opsional) Atur `VITE_SIGNALING_URL` dan `VITE_CLIENT_URL` via [extension/.env.example](./extension/.env.example) atau langsung lewat tombol gerigi di Side Panel.
 
+## Local HTTPS Testing (Android & iOS Safari)
+
+Karena browser mobile mewajibkan HTTPS untuk `getUserMedia` dan Wake Lock, gunakan **1 tunnel HTTPS** saja memanfaatkan proxy `/ws` bawaan `client-web`:
+
+```bash
+# Terminal 1
+npm run dev:signaling
+
+# Terminal 2
+npm run dev:client
+
+# Terminal 3 (Cloudflare Quick Tunnel — gratis tanpa akun; alternatif: ngrok http 5173)
+cloudflared tunnel --url http://localhost:5173
+```
+
+Kemudian di **Settings** Side Panel Chrome Extension:
+1. Isi **Mic Client URL** dengan `https://<host-tunnel>`.
+2. Klik tombol **"Pakai Proxy (`wss://<host-tunnel>/ws`)"** lalu klik **Simpan**.
+3. Buat Session Room dan scan QR Code dari HP Android/iOS pada Wi-Fi yang sama.
+
+## Production Deployment
+
+Konfigurasi siap pakai telah tersedia di repositori:
+
+- **`client-web` (Static HTTPS)**:
+  - **Vercel**: [client-web/vercel.json](./client-web/vercel.json) (`Root Directory: client-web`, set `VITE_SIGNALING_URL=wss://...`).
+  - **Cloudflare Pages**: [client-web/public/_headers](./client-web/public/_headers) (`Root directory: client-web`, `Build command: npm run build`, `Output: dist`).
+- **`signaling-server` (Persistent WebSocket)**:
+  - **Docker / VPS / Server Kantor**: [signaling-server/Dockerfile](./signaling-server/Dockerfile) + [.dockerignore](./.dockerignore) (build dari root: `docker build -f signaling-server/Dockerfile -t karosync-signaling .`).
+  - **Fly.io**: [signaling-server/fly.toml](./signaling-server/fly.toml) (`fly deploy --config signaling-server/fly.toml --dockerfile signaling-server/Dockerfile`).
+  - **Railway**: [signaling-server/railway.json](./signaling-server/railway.json).
+- **`extension` (Chrome Operator)**:
+  - Salin [extension/.env.example](./extension/.env.example) menjadi `extension/.env.production`, isi `VITE_SIGNALING_URL` & `VITE_CLIENT_URL`, lalu jalankan `npm run build --workspace=@karosync/extension`.

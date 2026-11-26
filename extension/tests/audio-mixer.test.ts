@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   AudioMixer,
+  COMPRESSOR_PRESETS,
   type AnalyserNodeLike,
   type AudioContextLike,
   type AudioNodeLike,
@@ -61,6 +62,8 @@ class FakeCompressorNode extends FakeNode implements DynamicsCompressorNodeLike 
 class FakeAudioContext implements AudioContextLike {
   public state: AudioContextState = 'running';
   public currentTime = 0;
+  public baseLatency = 0.01;
+  public outputLatency = 0.015;
   public readonly destination: AudioNodeLike = new FakeNode();
   public gains: FakeGainNode[] = [];
   public analysers: FakeAnalyserNode[] = [];
@@ -162,6 +165,21 @@ describe('AudioMixer', () => {
     mixer.setPeerVolume('client-1', 1.25);
     mixer.setPeerMuted('client-1', false);
     expect(peerGain.gain.value).toBe(1.25);
+
+    // Live compressor tuning updates DynamicsCompressorNode & clamps safely
+    const tvSafe = mixer.setCompressorSettings(COMPRESSOR_PRESETS.tv_safe);
+    expect(tvSafe.threshold).toBe(-22);
+    expect(tvSafe.ratio).toBe(12);
+    expect(compressor.threshold.value).toBe(-22);
+    expect(compressor.ratio.value).toBe(12);
+
+    const clamped = mixer.setCompressorSettings({ threshold: -99, ratio: 50 });
+    expect(clamped.threshold).toBe(-40);
+    expect(clamped.ratio).toBe(20);
+    expect(mixer.getCompressorSettings().threshold).toBe(-40);
+
+    // Reports combined baseLatency + outputLatency in milliseconds
+    expect(mixer.getOutputLatencyMs()).toBe(25);
 
     // Dispose cleans up nodes, sink, and AudioContext
     await mixer.dispose();

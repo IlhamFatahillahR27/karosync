@@ -408,6 +408,7 @@ describe('KaroSync Signaling Server (Phase 1)', () => {
 
     const res = await fetch(`${httpUrl}/health`);
     expect(res.status).toBe(200);
+    expect(res.headers.get('access-control-allow-origin')).toBe('*');
     const health = (await res.json()) as {
       status: string;
       rooms: number;
@@ -419,7 +420,64 @@ describe('KaroSync Signaling Server (Phase 1)', () => {
     expect(health.clients).toBe(1);
     expect(health.connections).toBe(2);
 
+    // HEAD /health is also supported for load balancer / uptime probes
+    const headRes = await fetch(`${httpUrl}/health`, { method: 'HEAD' });
+    expect(headRes.status).toBe(200);
+    expect(headRes.headers.get('access-control-allow-origin')).toBe('*');
+
     await client.close();
     await host.close();
+  });
+
+  it('accepts WebSocket upgrades on /ws path (Vite tunnel proxy compatibility)', async () => {
+    const host = await TestSocket.connect(`${wsUrl}/ws`);
+    host.send({ type: 'CREATE_ROOM' });
+    const created = await host.nextMessage();
+    expect(created.type).toBe('ROOM_CREATED');
+    await host.close();
+  });
+
+  it('enforces allowedOrigins when configured while allowing matching origins and wildcards', async () => {
+    const restricted = createSignalingServer({
+      host: '127.0.0.1',
+      port: 0,
+      heartbeatIntervalMs: 0,
+      allowedOrigins: ['https://mic.karosync.app', 'chrome-extension://*'],
+    });
+    const addr = await restricted.listen();
+    const url = `ws://${addr.host}:${addr.port}`;
+
+    try {
+      // Allowed exact origin
+      const allowedMic = new WebSocket(url, { origin: 'https://mic.karosync.app' });
+      await new Promise<void>((resolve, reject) => {
+        allowedMic.once('open', () => resolve());
+        allowedMic.once('error', reject);
+      });
+      allowedMic.close();
+
+      // Allowed wildcard origin (Chrome extension)
+      const allowedExt = new WebSocket(url, { origin: 'chrome-extension://abcdefghijklmnop' });
+      await new Promise<void>((resolve, reject) => {
+        allowedExt.once('open', () => resolve());
+        allowedExt.once('error', reject);
+      });
+      allowedExt.close();
+
+      // Disallowed origin is rejected with HTTP 403
+      const rejectedStatus = await new Promise<number>((resolve, reject) => {
+        const ws = new WebSocket(url, { origin: 'https://evil.example.com' });
+        ws.once('unexpected-response', (_req, res) => {
+          resolve(res.statusCode ?? 0);
+        });
+        ws.once('open', () => {
+          ws.close();
+          reject(new Error('Expected unauthorized origin to be rejected'));
+        });
+      });
+      expect(rejectedStatus).toBe(403);
+    } finally {
+      await restricted.close();
+    }
   });
 });

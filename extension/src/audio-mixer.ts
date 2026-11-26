@@ -32,6 +32,8 @@ export interface DynamicsCompressorNodeLike extends AudioNodeLike {
 export interface AudioContextLike {
   readonly state: AudioContextState;
   readonly currentTime: number;
+  readonly baseLatency?: number;
+  readonly outputLatency?: number;
   readonly destination: AudioNodeLike;
   createMediaStreamSource(stream: MediaStream): AudioNodeLike;
   createGain(): GainNodeLike;
@@ -40,6 +42,49 @@ export interface AudioContextLike {
   resume(): Promise<void>;
   close(): Promise<void>;
 }
+
+export type BuiltInCompressorPresetId = 'tv_safe' | 'balanced' | 'stage';
+export type CompressorPresetId = BuiltInCompressorPresetId | 'custom';
+
+export interface CompressorSettings {
+  threshold: number;
+  knee: number;
+  ratio: number;
+  attack: number;
+  release: number;
+}
+
+export const MIN_COMPRESSOR_THRESHOLD_DB = -36;
+export const MAX_COMPRESSOR_THRESHOLD_DB = -6;
+
+export const COMPRESSOR_PRESETS: Record<BuiltInCompressorPresetId, CompressorSettings> = {
+  tv_safe: {
+    threshold: -22,
+    knee: 10,
+    ratio: 12,
+    attack: 0.002,
+    release: 0.18,
+  },
+  balanced: {
+    threshold: -18,
+    knee: 12,
+    ratio: 8,
+    attack: 0.003,
+    release: 0.15,
+  },
+  stage: {
+    threshold: -12,
+    knee: 18,
+    ratio: 6,
+    attack: 0.005,
+    release: 0.12,
+  },
+};
+
+export const DEFAULT_COMPRESSOR_PRESET: BuiltInCompressorPresetId = 'balanced';
+export const DEFAULT_COMPRESSOR_SETTINGS: CompressorSettings = {
+  ...COMPRESSOR_PRESETS[DEFAULT_COMPRESSOR_PRESET],
+};
 
 export interface HiddenAudioElementLike {
   muted: boolean;
@@ -64,6 +109,7 @@ export interface MixerSampleSnapshot {
 export interface AudioMixerOptions {
   audioContextFactory?: () => AudioContextLike;
   audioElementFactory?: () => HiddenAudioElementLike;
+  initialCompressorSettings?: Partial<CompressorSettings>;
   onStateChange?: (state: AudioContextState) => void;
 }
 
@@ -85,6 +131,26 @@ interface PeerGainSetting {
 export const MIN_GAIN = 0;
 export const MAX_GAIN = 1.5;
 const RAMP_TIME_CONSTANT_SEC = 0.015;
+
+function clampRange(value: number, min: number, max: number, fallback: number): number {
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, value));
+}
+
+export function normalizeCompressorSettings(
+  partial?: Partial<CompressorSettings>,
+  base: CompressorSettings = DEFAULT_COMPRESSOR_SETTINGS,
+): CompressorSettings {
+  return {
+    threshold: clampRange(partial?.threshold ?? base.threshold, -40, 0, base.threshold),
+    knee: clampRange(partial?.knee ?? base.knee, 0, 40, base.knee),
+    ratio: clampRange(partial?.ratio ?? base.ratio, 1, 20, base.ratio),
+    attack: clampRange(partial?.attack ?? base.attack, 0, 1, base.attack),
+    release: clampRange(partial?.release ?? base.release, 0, 1, base.release),
+  };
+}
 
 function clampGain(value: number): number {
   if (!Number.isFinite(value)) {
@@ -127,6 +193,7 @@ export class AudioMixer {
   private ctx: AudioContextLike | null = null;
   private masterGain: GainNodeLike | null = null;
   private compressor: DynamicsCompressorNodeLike | null = null;
+  private compressorSettings: CompressorSettings;
   private masterVolume = 1;
 
   private readonly channels = new Map<string, PeerChannel>();
@@ -135,11 +202,48 @@ export class AudioMixer {
   constructor(options: AudioMixerOptions = {}) {
     this.audioContextFactory = options.audioContextFactory ?? defaultAudioContextFactory;
     this.audioElementFactory = options.audioElementFactory ?? defaultAudioElementFactory;
+    this.compressorSettings = normalizeCompressorSettings(options.initialCompressorSettings);
     this.onStateChange = options.onStateChange;
   }
 
   public getContextState(): AudioContextState {
     return this.ctx?.state ?? 'suspended';
+  }
+
+  public getCompressorSettings(): CompressorSettings {
+    return { ...this.compressorSettings };
+  }
+
+  public setCompressorSettings(partial: Partial<CompressorSettings>): CompressorSettings {
+    const next = normalizeCompressorSettings(partial, this.compressorSettings);
+    this.compressorSettings = next;
+    if (this.compressor && this.ctx) {
+      const now = this.ctx.currentTime;
+      setSmoothParam(this.compressor.threshold, next.threshold, now);
+      setSmoothParam(this.compressor.knee, next.knee, now);
+      setSmoothParam(this.compressor.ratio, next.ratio, now);
+      setSmoothParam(this.compressor.attack, next.attack, now);
+      setSmoothParam(this.compressor.release, next.release, now);
+    }
+    return { ...next };
+  }
+
+  public getOutputLatencyMs(): number | null {
+    if (!this.ctx) {
+      return null;
+    }
+    const base =
+      typeof this.ctx.baseLatency === 'number' && Number.isFinite(this.ctx.baseLatency)
+        ? this.ctx.baseLatency
+        : null;
+    const output =
+      typeof this.ctx.outputLatency === 'number' && Number.isFinite(this.ctx.outputLatency)
+        ? this.ctx.outputLatency
+        : null;
+    if (base === null && output === null) {
+      return null;
+    }
+    return Math.round(((base ?? 0) + (output ?? 0)) * 1000);
   }
 
   public ensureInitialized(): AudioContextLike {
@@ -153,11 +257,11 @@ export class AudioMixer {
 
     const compressor = ctx.createDynamicsCompressor();
     // Karaoke vocal safety limiter/compressor to prevent TV/HDMI speaker clipping
-    compressor.threshold.value = -18;
-    compressor.knee.value = 12;
-    compressor.ratio.value = 8;
-    compressor.attack.value = 0.003;
-    compressor.release.value = 0.15;
+    compressor.threshold.value = this.compressorSettings.threshold;
+    compressor.knee.value = this.compressorSettings.knee;
+    compressor.ratio.value = this.compressorSettings.ratio;
+    compressor.attack.value = this.compressorSettings.attack;
+    compressor.release.value = this.compressorSettings.release;
 
     masterGain.connect(compressor);
     compressor.connect(ctx.destination);

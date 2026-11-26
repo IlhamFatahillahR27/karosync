@@ -30,6 +30,13 @@ describe('OperatorSession', () => {
     };
 
     let currentRms = 0;
+    let currentCompressor = {
+      threshold: -18,
+      knee: 12,
+      ratio: 8,
+      attack: 0.003,
+      release: 0.15,
+    };
     const fakeMixer: AudioMixerLike = {
       getContextState: () => 'running',
       ensureRunning: vi.fn(async () => 'running' as AudioContextState),
@@ -37,6 +44,12 @@ describe('OperatorSession', () => {
       setPeerVolume: vi.fn(),
       setPeerMuted: vi.fn(),
       setMasterVolume: vi.fn(),
+      getCompressorSettings: () => ({ ...currentCompressor }),
+      setCompressorSettings: vi.fn((partial) => {
+        currentCompressor = { ...currentCompressor, ...partial };
+        return { ...currentCompressor };
+      }),
+      getOutputLatencyMs: () => 18,
       sampleLevels: () => ({
         levels: new Map([['c1', { rms: currentRms, peak: currentRms, normalized: currentRms }]]),
         maxActiveRms: currentRms,
@@ -88,6 +101,19 @@ describe('OperatorSession', () => {
 
     expect(session.getState().roomStatus).toBe('idle');
     expect(session.getState().roomId).toBeNull();
+    expect(session.getState().compressorPreset).toBe('balanced');
+    expect(session.getState().compressor.threshold).toBe(-18);
+    expect(session.getState().audioLatencyMs).toBe(18);
+
+    // Tune vocal limiter preset & custom threshold
+    session.setCompressorPreset('tv_safe');
+    expect(session.getState().compressorPreset).toBe('tv_safe');
+    expect(session.getState().compressor.threshold).toBe(-22);
+    expect(session.getState().compressor.ratio).toBe(12);
+
+    session.setCompressorThreshold(-26);
+    expect(session.getState().compressorPreset).toBe('custom');
+    expect(session.getState().compressor.threshold).toBe(-26);
 
     session.startRoom();
     signalingOpts!.callbacks.onRoomCreated({ type: 'ROOM_CREATED', roomId: 'K7M2PX' });

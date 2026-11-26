@@ -6,16 +6,26 @@ function parsePositiveInt(raw: string | undefined, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function parseOriginList(raw: string | undefined): string[] {
+  if (!raw) return [];
+  return raw
+    .split(',')
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+}
+
 const host = process.env.HOST ?? '0.0.0.0';
 const port = parsePositiveInt(process.env.PORT, 8080);
 const maxClientsPerRoom = parsePositiveInt(process.env.MAX_CLIENTS_PER_ROOM, 8);
 const heartbeatIntervalMs = parsePositiveInt(process.env.HEARTBEAT_INTERVAL_MS, 30_000);
+const allowedOrigins = parseOriginList(process.env.ALLOWED_ORIGINS);
 
 const server = createSignalingServer({
   host,
   port,
   maxClientsPerRoom,
   heartbeatIntervalMs,
+  allowedOrigins,
 });
 
 const address = await server.listen();

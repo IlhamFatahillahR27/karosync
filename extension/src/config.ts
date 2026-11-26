@@ -1,3 +1,12 @@
+import {
+  COMPRESSOR_PRESETS,
+  DEFAULT_COMPRESSOR_PRESET,
+  MAX_COMPRESSOR_THRESHOLD_DB,
+  MIN_COMPRESSOR_THRESHOLD_DB,
+  type BuiltInCompressorPresetId,
+  type CompressorPresetId,
+} from './audio-mixer';
+
 export const DEFAULT_SIGNALING_URL = 'ws://localhost:8080';
 export const DEFAULT_CLIENT_BASE_URL = 'http://localhost:5173';
 
@@ -12,8 +21,14 @@ export interface OperatorSettings {
   includeWsInQr: boolean;
 }
 
+export interface SavedCompressorConfig {
+  preset: CompressorPresetId;
+  thresholdDb: number;
+}
+
 const STORAGE_SETTINGS_KEY = 'karosync.operator.settings';
 const STORAGE_DUCKING_KEY = 'karosync.operator.duckingEnabled';
+const STORAGE_COMPRESSOR_KEY = 'karosync.operator.compressor';
 
 export function isValidWebSocketUrl(raw: string): boolean {
   const trimmed = raw.trim();
@@ -138,6 +153,95 @@ export function loadDuckingEnabled(): boolean {
 export function saveDuckingEnabled(enabled: boolean): void {
   try {
     window.localStorage.setItem(STORAGE_DUCKING_KEY, enabled ? 'true' : 'false');
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+function isLocalHostname(hostname: string): boolean {
+  const lower = hostname.trim().toLowerCase();
+  return lower === 'localhost' || lower === '127.0.0.1' || lower === '::1' || lower === '[::1]';
+}
+
+export function deriveTunnelSignalingUrl(clientBaseUrl: string): string | null {
+  if (!isValidHttpUrl(clientBaseUrl)) {
+    return null;
+  }
+  const parsed = new URL(clientBaseUrl.trim());
+  const wsProtocol = parsed.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${wsProtocol}//${parsed.host}/ws`;
+}
+
+export function detectMixedContentQrWarning(settings: OperatorSettings): string | null {
+  if (!settings.includeWsInQr) {
+    return null;
+  }
+  if (!isValidHttpUrl(settings.clientBaseUrl) || !isValidWebSocketUrl(settings.signalingUrl)) {
+    return null;
+  }
+
+  const clientUrl = new URL(settings.clientBaseUrl.trim());
+  const sigUrl = new URL(settings.signalingUrl.trim());
+
+  if (clientUrl.protocol === 'https:' && sigUrl.protocol === 'ws:') {
+    return 'Halaman Mic HTTPS akan memblokir WebSocket ws:// (Mixed Content). Gunakan wss:// (mis. proxy /ws dari tunnel HTTPS atau server produksi).';
+  }
+
+  if (!isLocalHostname(clientUrl.hostname) && isLocalHostname(sigUrl.hostname)) {
+    return 'HP tidak dapat menjangkau Signaling Server di localhost. Gunakan alamat wss:// tunnel (/ws) atau IP/domain server.';
+  }
+
+  return null;
+}
+
+function isBuiltInPreset(value: unknown): value is BuiltInCompressorPresetId {
+  return value === 'tv_safe' || value === 'balanced' || value === 'stage';
+}
+
+export function getDefaultCompressorConfig(): SavedCompressorConfig {
+  return {
+    preset: DEFAULT_COMPRESSOR_PRESET,
+    thresholdDb: COMPRESSOR_PRESETS[DEFAULT_COMPRESSOR_PRESET].threshold,
+  };
+}
+
+export function loadCompressorConfig(): SavedCompressorConfig {
+  const defaults = getDefaultCompressorConfig();
+  try {
+    const raw = window.localStorage.getItem(STORAGE_COMPRESSOR_KEY);
+    if (!raw) {
+      return defaults;
+    }
+    const parsed = JSON.parse(raw) as Partial<SavedCompressorConfig>;
+    if (isBuiltInPreset(parsed.preset)) {
+      return {
+        preset: parsed.preset,
+        thresholdDb: COMPRESSOR_PRESETS[parsed.preset].threshold,
+      };
+    }
+    if (
+      parsed.preset === 'custom' &&
+      typeof parsed.thresholdDb === 'number' &&
+      Number.isFinite(parsed.thresholdDb)
+    ) {
+      const clamped = Math.min(
+        MAX_COMPRESSOR_THRESHOLD_DB,
+        Math.max(MIN_COMPRESSOR_THRESHOLD_DB, Math.round(parsed.thresholdDb)),
+      );
+      return {
+        preset: 'custom',
+        thresholdDb: clamped,
+      };
+    }
+    return defaults;
+  } catch {
+    return defaults;
+  }
+}
+
+export function saveCompressorConfig(config: SavedCompressorConfig): void {
+  try {
+    window.localStorage.setItem(STORAGE_COMPRESSOR_KEY, JSON.stringify(config));
   } catch {
     // Ignore storage errors
   }

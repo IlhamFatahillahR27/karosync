@@ -1,13 +1,25 @@
-import { AudioMixer, type MixerSampleSnapshot } from './audio-mixer';
+import {
+  AudioMixer,
+  COMPRESSOR_PRESETS,
+  MAX_COMPRESSOR_THRESHOLD_DB,
+  MIN_COMPRESSOR_THRESHOLD_DB,
+  type BuiltInCompressorPresetId,
+  type CompressorPresetId,
+  type CompressorSettings,
+  type MixerSampleSnapshot,
+} from './audio-mixer';
 import {
   buildMicJoinUrl,
   isValidHttpUrl,
   isValidWebSocketUrl,
+  loadCompressorConfig,
   loadDuckingEnabled,
   loadOperatorSettings,
+  saveCompressorConfig,
   saveDuckingEnabled,
   saveOperatorSettings,
   type OperatorSettings,
+  type SavedCompressorConfig,
 } from './config';
 import { QuickDuckingController } from './ducking';
 import { HostSignalingClient, type HostSignalingOptions } from './host-signaling';
@@ -49,6 +61,9 @@ export interface OperatorState {
   joinUrl: string | null;
   error: string | null;
   audioContextState: AudioContextState;
+  audioLatencyMs: number | null;
+  compressorPreset: CompressorPresetId;
+  compressor: CompressorSettings;
   settings: OperatorSettings;
   masterVocalVolume: number;
   youtube: YouTubePanelState;
@@ -80,6 +95,9 @@ export interface AudioMixerLike {
   setPeerVolume(clientId: string, volume: number): void;
   setPeerMuted(clientId: string, muted: boolean): void;
   setMasterVolume(volume: number): void;
+  getCompressorSettings?(): CompressorSettings;
+  setCompressorSettings?(partial: Partial<CompressorSettings>): CompressorSettings;
+  getOutputLatencyMs?(): number | null;
   sampleLevels(): MixerSampleSnapshot;
   removePeer(clientId: string): void;
   dispose(): Promise<void>;
@@ -93,6 +111,7 @@ export interface YouTubeControllerLike {
 export interface OperatorSessionDependencies {
   initialSettings?: OperatorSettings;
   initialDuckingEnabled?: boolean;
+  initialCompressorConfig?: SavedCompressorConfig;
   youtubePollIntervalMs?: number;
   createSignalingClient?: (options: HostSignalingOptions) => HostSignalingLike;
   createWebRtcManager?: (options: WebRtcReceiverManagerOptions) => WebRtcReceiverLike;
@@ -126,6 +145,11 @@ export class OperatorSession {
   constructor(deps: OperatorSessionDependencies = {}) {
     const settings = deps.initialSettings ?? loadOperatorSettings();
     const duckingEnabled = deps.initialDuckingEnabled ?? loadDuckingEnabled();
+    const savedCompressor = deps.initialCompressorConfig ?? loadCompressorConfig();
+    const initialCompressorSettings: CompressorSettings =
+      savedCompressor.preset === 'custom'
+        ? { ...COMPRESSOR_PRESETS.balanced, threshold: savedCompressor.thresholdDb }
+        : { ...COMPRESSOR_PRESETS[savedCompressor.preset] };
 
     this.createSignalingClient =
       deps.createSignalingClient ?? ((options) => new HostSignalingClient(options));
@@ -134,8 +158,12 @@ export class OperatorSession {
     this.audioMixer =
       deps.audioMixer ??
       new AudioMixer({
+        initialCompressorSettings,
         onStateChange: (audioContextState) => {
-          this.updateState({ audioContextState });
+          this.updateState({
+            audioContextState,
+            audioLatencyMs: this.audioMixer.getOutputLatencyMs?.() ?? null,
+          });
         },
       });
     this.youtube = deps.youtubeController ?? new YouTubeController();
@@ -147,6 +175,11 @@ export class OperatorSession {
       });
     this.youtubePollIntervalMs = deps.youtubePollIntervalMs ?? DEFAULT_YT_POLL_INTERVAL_MS;
 
+    const resolvedCompressor =
+      this.audioMixer.setCompressorSettings?.(initialCompressorSettings) ??
+      this.audioMixer.getCompressorSettings?.() ??
+      initialCompressorSettings;
+
     this.state = {
       roomStatus: 'idle',
       statusDetail: 'Siap membuat Room KaroSync.',
@@ -154,6 +187,9 @@ export class OperatorSession {
       joinUrl: null,
       error: null,
       audioContextState: this.audioMixer.getContextState(),
+      audioLatencyMs: this.audioMixer.getOutputLatencyMs?.() ?? null,
+      compressorPreset: savedCompressor.preset,
+      compressor: resolvedCompressor,
       settings,
       masterVocalVolume: 1,
       youtube: {
@@ -437,7 +473,45 @@ export class OperatorSession {
 
   public async resumeAudio(): Promise<void> {
     const audioContextState = await this.audioMixer.ensureRunning();
-    this.updateState({ audioContextState });
+    this.updateState({
+      audioContextState,
+      audioLatencyMs: this.audioMixer.getOutputLatencyMs?.() ?? null,
+    });
+  }
+
+  public setCompressorPreset(preset: BuiltInCompressorPresetId): void {
+    const presetSettings = { ...COMPRESSOR_PRESETS[preset] };
+    const applied = this.audioMixer.setCompressorSettings?.(presetSettings) ?? presetSettings;
+    saveCompressorConfig({
+      preset,
+      thresholdDb: applied.threshold,
+    });
+    this.updateState({
+      compressorPreset: preset,
+      compressor: applied,
+    });
+  }
+
+  public setCompressorThreshold(thresholdDb: number): void {
+    const clamped = Math.min(
+      MAX_COMPRESSOR_THRESHOLD_DB,
+      Math.max(
+        MIN_COMPRESSOR_THRESHOLD_DB,
+        Number.isFinite(thresholdDb) ? Math.round(thresholdDb) : COMPRESSOR_PRESETS.balanced.threshold,
+      ),
+    );
+    const applied = this.audioMixer.setCompressorSettings?.({ threshold: clamped }) ?? {
+      ...this.state.compressor,
+      threshold: clamped,
+    };
+    saveCompressorConfig({
+      preset: 'custom',
+      thresholdDb: applied.threshold,
+    });
+    this.updateState({
+      compressorPreset: 'custom',
+      compressor: applied,
+    });
   }
 
   public setMasterVocalVolume(volume: number): void {
@@ -571,6 +645,11 @@ export class OperatorSession {
 
   public sampleMeters(nowMs = Date.now()): MixerSampleSnapshot {
     const snapshot = this.audioMixer.sampleLevels();
+
+    const nextLatencyMs = this.audioMixer.getOutputLatencyMs?.() ?? null;
+    if (nextLatencyMs !== this.state.audioLatencyMs) {
+      this.updateState({ audioLatencyMs: nextLatencyMs });
+    }
 
     const duckResult = this.ducking.processSpeechLevel(snapshot.maxActiveRms, nowMs);
     if (duckResult.changed) {
