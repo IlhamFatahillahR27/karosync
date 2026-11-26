@@ -1,0 +1,19 @@
+{
+  "name": "karosync",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Scan, Sync, Sing — Turn any YouTube tab into a wireless karaoke stage.",
+  "workspaces": [
+    "signaling-server",
+    "client-web",
+    "extension"
+  ],
+  "scripts": {
+    "dev:signaling": "npm run dev --workspace=@karosync/signaling",
+    "dev:client": "npm run dev --workspace=@karosync/client",
+    "dev:extension": "npm run dev --workspace=@karosync/extension",
+    "build": "npm run build --workspaces",
+    "typecheck": "npm run typecheck --workspaces",
+    "test": "npm run test --workspace=@karosync/signaling"
+  }
+}

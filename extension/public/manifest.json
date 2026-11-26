@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "KaroSync Operator",
+  "version": "0.1.0",
+  "description": "Scan, Sync, Sing — Turn any YouTube tab into a wireless karaoke stage.",
+  "permissions": ["sidePanel", "activeTab", "scripting"],
+  "action": {
+    "default_title": "Open KaroSync Operator"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://www.youtube.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
