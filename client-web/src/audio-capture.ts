@@ -1,6 +1,7 @@
 import {
-  VOCAL_AUDIO_CONSTRAINTS,
-  VOCAL_AUDIO_FALLBACK_CONSTRAINTS,
+  DEFAULT_AUDIO_CAPTURE_MODE,
+  getAudioConstraintsForMode,
+  type AudioCaptureMode,
 } from './config';
 
 export interface AudioLevels {
@@ -10,6 +11,7 @@ export interface AudioLevels {
 }
 
 export interface AudioCaptureCallbacks {
+  mode?: AudioCaptureMode;
   onTrackEnded?: () => void;
 }
 
@@ -70,17 +72,21 @@ export class AudioCapture {
       );
     }
 
+    const { primary, fallback } = getAudioConstraintsForMode(
+      callbacks.mode ?? DEFAULT_AUDIO_CAPTURE_MODE,
+    );
+
     let stream: MediaStream;
     try {
       stream = await mediaDevices.getUserMedia({
-        audio: VOCAL_AUDIO_CONSTRAINTS,
+        audio: primary,
         video: false,
       });
     } catch (error) {
       const errorName = error instanceof Error ? error.name : '';
       if (errorName === 'OverconstrainedError' || errorName === 'TypeError') {
         stream = await mediaDevices.getUserMedia({
-          audio: VOCAL_AUDIO_FALLBACK_CONSTRAINTS,
+          audio: fallback,
           video: false,
         });
       } else {

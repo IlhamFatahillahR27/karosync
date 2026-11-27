@@ -51,7 +51,9 @@ describe('OperatorSession', () => {
       }),
       getOutputLatencyMs: () => 18,
       sampleLevels: () => ({
-        levels: new Map([['c1', { rms: currentRms, peak: currentRms, normalized: currentRms }]]),
+        levels: new Map([
+          ['c1', { rms: currentRms, peak: currentRms, normalized: currentRms, gateOpen: true }],
+        ]),
         maxActiveRms: currentRms,
         compressorReductionDb: 0,
       }),
@@ -125,10 +127,8 @@ describe('OperatorSession', () => {
 
     session.startRoom();
     signalingOpts!.callbacks.onRoomCreated({ type: 'ROOM_CREATED', roomId: 'K7M2PX' });
-    signalingOpts!.callbacks.onPingUpdate?.(11);
     await Promise.resolve();
     expect(session.getState().roomStatus).toBe('live');
-    expect(session.getState().serverPingMs).toBe(11);
     expect(session.getState().joinUrl).toContain('room=K7M2PX');
     expect(session.getState().youtube.connected).toBe(true);
     expect(session.getState().youtube.targetVolume).toBe(0.8);
@@ -158,6 +158,29 @@ describe('OperatorSession', () => {
     expect(fakeMixer.setPeerMuted).toHaveBeenCalledWith('c1', true);
     expect(fakeWebRtc.setHostMute).toHaveBeenCalledWith('c1', true);
     expect(session.getState().peers[0]!.hostMuted).toBe(true);
+
+    // Add second peer -> test Solo & Mute All
+    signalingOpts!.callbacks.onClientJoined({
+      type: 'CLIENT_JOINED',
+      roomId: 'K7M2PX',
+      clientId: 'c2',
+      clientName: 'Budi',
+    });
+    session.soloPeer('c1');
+    expect(session.getState().peers.find((p) => p.clientId === 'c1')!.hostMuted).toBe(false);
+    expect(session.getState().peers.find((p) => p.clientId === 'c2')!.hostMuted).toBe(true);
+
+    session.muteAllPeers();
+    expect(session.getState().peers.every((p) => p.hostMuted)).toBe(true);
+
+    // Anti-Feedback DSP toggles update state cleanly
+    session.setHighPassEnabled(false);
+    session.setNoiseGateThreshold(0.06);
+    expect(session.getState().antiFeedback.highPassEnabled).toBe(false);
+    expect(session.getState().antiFeedback.noiseGateThreshold).toBeCloseTo(0.06, 4);
+
+    // Remove second peer before kick check
+    session.kickPeer('c2');
 
     // Kick peer -> sends KICK_CLIENT and cleans up peer & restores ducking
     session.kickPeer('c1');

@@ -1,6 +1,7 @@
 import './style.css';
 import {
   getEnvSignalingUrl,
+  loadSavedAudioMode,
   loadSavedSingerName,
   parseLaunchParams,
   resolveSignalingUrl,
@@ -14,6 +15,7 @@ if (appRoot) {
   const launch = parseLaunchParams(window.location.search);
   const envWs = getEnvSignalingUrl();
   const savedName = loadSavedSingerName();
+  const savedAudioMode = loadSavedAudioMode();
 
   const defaultSignalingUrl = resolveSignalingUrl({
     queryWs: launch.querySignalingUrl,
@@ -25,6 +27,7 @@ if (appRoot) {
     roomId: launch.roomId,
     clientName: savedName,
     signalingUrl: defaultSignalingUrl,
+    audioMode: savedAudioMode,
   });
 
   const ui = new KaroSyncMicUI({

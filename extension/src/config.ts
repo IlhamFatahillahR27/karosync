@@ -1,8 +1,11 @@
 import {
   COMPRESSOR_PRESETS,
+  DEFAULT_ANTI_FEEDBACK_DSP,
   DEFAULT_COMPRESSOR_PRESET,
   MAX_COMPRESSOR_THRESHOLD_DB,
   MIN_COMPRESSOR_THRESHOLD_DB,
+  normalizeAntiFeedbackDsp,
+  type AntiFeedbackDspSettings,
   type BuiltInCompressorPresetId,
   type CompressorPresetId,
 } from './audio-mixer';
@@ -29,6 +32,7 @@ export interface SavedCompressorConfig {
 const STORAGE_SETTINGS_KEY = 'karosync.operator.settings';
 const STORAGE_DUCKING_KEY = 'karosync.operator.duckingEnabled';
 const STORAGE_COMPRESSOR_KEY = 'karosync.operator.compressor';
+const STORAGE_ANTI_FEEDBACK_KEY = 'karosync.operator.antiFeedbackDsp';
 
 export function isValidWebSocketUrl(raw: string): boolean {
   const trimmed = raw.trim();
@@ -242,6 +246,27 @@ export function loadCompressorConfig(): SavedCompressorConfig {
 export function saveCompressorConfig(config: SavedCompressorConfig): void {
   try {
     window.localStorage.setItem(STORAGE_COMPRESSOR_KEY, JSON.stringify(config));
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+export function loadAntiFeedbackDsp(): AntiFeedbackDspSettings {
+  try {
+    const raw = window.localStorage.getItem(STORAGE_ANTI_FEEDBACK_KEY);
+    if (!raw) {
+      return { ...DEFAULT_ANTI_FEEDBACK_DSP };
+    }
+    const parsed = JSON.parse(raw) as Partial<AntiFeedbackDspSettings>;
+    return normalizeAntiFeedbackDsp(parsed);
+  } catch {
+    return { ...DEFAULT_ANTI_FEEDBACK_DSP };
+  }
+}
+
+export function saveAntiFeedbackDsp(settings: AntiFeedbackDspSettings): void {
+  try {
+    window.localStorage.setItem(STORAGE_ANTI_FEEDBACK_KEY, JSON.stringify(settings));
   } catch {
     // Ignore storage errors
   }

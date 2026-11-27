@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  ANTI_FEEDBACK_AUDIO_CONSTRAINTS,
   VOCAL_AUDIO_CONSTRAINTS,
+  getAudioConstraintsForMode,
   normalizeRoomId,
   parseLaunchParams,
   resolveSignalingUrl,
@@ -9,13 +11,23 @@ import {
 } from '../src/config';
 
 describe('config helpers', () => {
-  it('exposes low-latency vocal audio constraints matching KaroSync spec', () => {
+  it('exposes low-latency vocal and anti-feedback audio constraints', () => {
     expect(VOCAL_AUDIO_CONSTRAINTS).toEqual({
       echoCancellation: false,
       noiseSuppression: false,
       autoGainControl: false,
       latency: 0.01,
     });
+    expect(ANTI_FEEDBACK_AUDIO_CONSTRAINTS).toEqual({
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: false,
+      latency: 0.01,
+    });
+    expect(getAudioConstraintsForMode('anti_feedback').primary).toEqual(
+      ANTI_FEEDBACK_AUDIO_CONSTRAINTS,
+    );
+    expect(getAudioConstraintsForMode('raw_vocal').primary).toEqual(VOCAL_AUDIO_CONSTRAINTS);
   });
 
   it('normalizes and validates room IDs', () => {

@@ -24,9 +24,15 @@ export interface DataChannelLike {
   close(): void;
 }
 
+export interface RtpReceiverLike {
+  playoutDelayHint?: number;
+  jitterBufferTarget?: number;
+}
+
 export interface TrackEventLike {
   readonly track: MediaStreamTrack;
   readonly streams: ReadonlyArray<MediaStream>;
+  readonly receiver?: RtpReceiverLike;
 }
 
 export interface PeerConnectionLike {
@@ -72,11 +78,81 @@ interface PeerEntry {
   pendingIceCandidates: IceCandidatePayload[];
   hostMuted: boolean;
   lastReportedState: RTCPeerConnectionState;
-  statsTimer: ReturnType<typeof setInterval> | null;
+  statsTimer: ReturnType<typeof setTimeout> | null;
   closed: boolean;
 }
 
-const DEFAULT_STATS_POLL_INTERVAL_MS = 3000;
+const DEFAULT_STATS_RETRY_DELAY_MS = 2000;
+
+export function preferLowLatencyOpusSdp(sdp: string | undefined): string | undefined {
+  if (!sdp) {
+    return sdp;
+  }
+  const opusMatch = sdp.match(/a=rtpmap:(\d+)\s+opus\/48000/i);
+  if (!opusMatch?.[1]) {
+    return sdp;
+  }
+  const payloadType = opusMatch[1];
+  const lineEnding = sdp.includes('\r\n') ? '\r\n' : '\n';
+  const lines = sdp.split(/\r?\n/);
+  const fmtpPrefix = `a=fmtp:${payloadType} `;
+  let hasFmtp = false;
+  let hasPtime = false;
+  let hasMinPtime = false;
+
+  const updated = lines.map((line) => {
+    if (line.startsWith('a=ptime:')) {
+      hasPtime = true;
+      return 'a=ptime:10';
+    }
+    if (line.startsWith('a=minptime:')) {
+      hasMinPtime = true;
+      return 'a=minptime:10';
+    }
+    if (line.startsWith(fmtpPrefix)) {
+      hasFmtp = true;
+      let params = line.slice(fmtpPrefix.length);
+      if (/minptime=\d+/i.test(params)) {
+        params = params.replace(/minptime=\d+/i, 'minptime=10');
+      } else {
+        params = `${params};minptime=10`;
+      }
+      if (/useinbandfec=\d+/i.test(params)) {
+        params = params.replace(/useinbandfec=\d+/i, 'useinbandfec=0');
+      } else {
+        params = `${params};useinbandfec=0`;
+      }
+      if (/stereo=\d+/i.test(params)) {
+        params = params.replace(/stereo=\d+/i, 'stereo=0');
+      } else {
+        params = `${params};stereo=0`;
+      }
+      return `${fmtpPrefix}${params}`;
+    }
+    return line;
+  });
+
+  if (!hasFmtp) {
+    const rtpmapIdx = updated.findIndex((line) =>
+      line.startsWith(`a=rtpmap:${payloadType} `),
+    );
+    if (rtpmapIdx >= 0) {
+      updated.splice(rtpmapIdx + 1, 0, `${fmtpPrefix}minptime=10;useinbandfec=0;stereo=0`);
+    }
+  }
+
+  if (!hasPtime || !hasMinPtime) {
+    const audioIdx = updated.findIndex((line) => line.startsWith('m=audio '));
+    if (audioIdx >= 0) {
+      const insertLines: string[] = [];
+      if (!hasMinPtime) insertLines.push('a=minptime:10');
+      if (!hasPtime) insertLines.push('a=ptime:10');
+      updated.splice(audioIdx + 1, 0, ...insertLines);
+    }
+  }
+
+  return updated.join(lineEnding);
+}
 
 function mapCandidateTypeLabel(candidateType: RouteInfo['candidateType']): string {
   switch (candidateType) {
@@ -127,7 +203,7 @@ export class WebRtcReceiverManager {
 
   constructor(options: WebRtcReceiverManagerOptions) {
     this.rtcConfig = options.rtcConfig ?? DEFAULT_RTC_CONFIG;
-    this.statsPollIntervalMs = options.statsPollIntervalMs ?? DEFAULT_STATS_POLL_INTERVAL_MS;
+    this.statsPollIntervalMs = options.statsPollIntervalMs ?? DEFAULT_STATS_RETRY_DELAY_MS;
     this.peerConnectionFactory =
       options.peerConnectionFactory ??
       ((config: RTCConfiguration) => new RTCPeerConnection(config) as unknown as PeerConnectionLike);
@@ -178,6 +254,18 @@ export class WebRtcReceiverManager {
       if (entry.closed) {
         return;
       }
+      if (event.receiver) {
+        try {
+          if ('playoutDelayHint' in event.receiver) {
+            event.receiver.playoutDelayHint = 0;
+          }
+          if ('jitterBufferTarget' in event.receiver) {
+            event.receiver.jitterBufferTarget = 0;
+          }
+        } catch {
+          // Non-fatal on browsers without jitter buffer hint support
+        }
+      }
       const stream = event.streams[0] ?? this.mediaStreamFactory([event.track]);
       this.callbacks.onStream(clientId, stream);
     };
@@ -221,9 +309,10 @@ export class WebRtcReceiverManager {
         if (entry.closed) {
           return;
         }
+        const optimizedSdp = preferLowLatencyOpusSdp(answer.sdp);
         const payload: SessionDescriptionPayload = {
           type: answer.type,
-          ...(answer.sdp !== undefined ? { sdp: answer.sdp } : {}),
+          ...(optimizedSdp !== undefined ? { sdp: optimizedSdp } : {}),
         };
         await entry.pc.setLocalDescription(payload);
         if (!entry.closed) {
@@ -386,20 +475,17 @@ export class WebRtcReceiverManager {
       return;
     }
     this.stopStatsPolling(entry);
-    void this.pollConnectionRoute(entry);
-    entry.statsTimer = setInterval(() => {
-      void this.pollConnectionRoute(entry);
-    }, this.statsPollIntervalMs);
+    void this.pollConnectionRoute(entry, true);
   }
 
   private stopStatsPolling(entry: PeerEntry): void {
     if (entry.statsTimer !== null) {
-      clearInterval(entry.statsTimer);
+      clearTimeout(entry.statsTimer);
       entry.statsTimer = null;
     }
   }
 
-  private async pollConnectionRoute(entry: PeerEntry): Promise<void> {
+  private async pollConnectionRoute(entry: PeerEntry, allowRetry = false): Promise<void> {
     if (entry.closed || !this.callbacks.onRouteInfoChange) {
       return;
     }
@@ -426,6 +512,12 @@ export class WebRtcReceiverManager {
       });
 
       if (!activePair) {
+        if (allowRetry && !entry.closed && this.statsPollIntervalMs > 0) {
+          entry.statsTimer = setTimeout(() => {
+            entry.statsTimer = null;
+            void this.pollConnectionRoute(entry, false);
+          }, this.statsPollIntervalMs);
+        }
         return;
       }
 

@@ -4,6 +4,10 @@ export interface VocalAudioTrackConstraints extends MediaTrackConstraints {
   latency?: ConstrainDouble;
 }
 
+export type AudioCaptureMode = 'raw_vocal' | 'anti_feedback';
+
+export const DEFAULT_AUDIO_CAPTURE_MODE: AudioCaptureMode = 'raw_vocal';
+
 export const VOCAL_AUDIO_CONSTRAINTS: VocalAudioTrackConstraints = {
   echoCancellation: false,
   noiseSuppression: false,
@@ -17,6 +21,35 @@ export const VOCAL_AUDIO_FALLBACK_CONSTRAINTS: MediaTrackConstraints = {
   autoGainControl: false,
 };
 
+export const ANTI_FEEDBACK_AUDIO_CONSTRAINTS: VocalAudioTrackConstraints = {
+  echoCancellation: true,
+  noiseSuppression: true,
+  autoGainControl: false,
+  latency: 0.01,
+};
+
+export const ANTI_FEEDBACK_FALLBACK_CONSTRAINTS: MediaTrackConstraints = {
+  echoCancellation: true,
+  noiseSuppression: true,
+  autoGainControl: false,
+};
+
+export function getAudioConstraintsForMode(mode: AudioCaptureMode): {
+  primary: VocalAudioTrackConstraints;
+  fallback: MediaTrackConstraints;
+} {
+  if (mode === 'raw_vocal') {
+    return {
+      primary: VOCAL_AUDIO_CONSTRAINTS,
+      fallback: VOCAL_AUDIO_FALLBACK_CONSTRAINTS,
+    };
+  }
+  return {
+    primary: ANTI_FEEDBACK_AUDIO_CONSTRAINTS,
+    fallback: ANTI_FEEDBACK_FALLBACK_CONSTRAINTS,
+  };
+}
+
 export const DEFAULT_RTC_CONFIG: RTCConfiguration = {
   iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
   iceCandidatePoolSize: 2,
@@ -24,6 +57,7 @@ export const DEFAULT_RTC_CONFIG: RTCConfiguration = {
 
 const STORAGE_SINGER_NAME_KEY = 'karosync.mic.singerName';
 const STORAGE_SIGNALING_URL_KEY = 'karosync.mic.signalingUrl';
+const STORAGE_AUDIO_MODE_KEY = 'karosync.mic.audioMode.v2';
 const DEFAULT_SIGNALING_PORT = 8080;
 
 export interface LaunchParams {
@@ -161,6 +195,23 @@ export function saveSignalingUrl(url: string | null): void {
     } else {
       window.localStorage.removeItem(STORAGE_SIGNALING_URL_KEY);
     }
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+export function loadSavedAudioMode(): AudioCaptureMode {
+  try {
+    const raw = window.localStorage.getItem(STORAGE_AUDIO_MODE_KEY);
+    return raw === 'raw_vocal' || raw === 'anti_feedback' ? raw : DEFAULT_AUDIO_CAPTURE_MODE;
+  } catch {
+    return DEFAULT_AUDIO_CAPTURE_MODE;
+  }
+}
+
+export function saveAudioMode(mode: AudioCaptureMode): void {
+  try {
+    window.localStorage.setItem(STORAGE_AUDIO_MODE_KEY, mode);
   } catch {
     // Ignore storage errors
   }

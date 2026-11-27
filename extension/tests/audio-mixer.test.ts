@@ -5,6 +5,7 @@ import {
   type AnalyserNodeLike,
   type AudioContextLike,
   type AudioNodeLike,
+  type BiquadFilterNodeLike,
   type DynamicsCompressorNodeLike,
   type GainNodeLike,
   type HiddenAudioElementLike,
@@ -59,6 +60,12 @@ class FakeCompressorNode extends FakeNode implements DynamicsCompressorNodeLike 
   public reduction = -3.5;
 }
 
+class FakeBiquadFilterNode extends FakeNode implements BiquadFilterNodeLike {
+  public type: BiquadFilterType = 'lowpass';
+  public readonly frequency = createFakeAudioParam(350);
+  public readonly Q = createFakeAudioParam(1);
+}
+
 class FakeAudioContext implements AudioContextLike {
   public state: AudioContextState = 'running';
   public currentTime = 0;
@@ -68,6 +75,7 @@ class FakeAudioContext implements AudioContextLike {
   public gains: FakeGainNode[] = [];
   public analysers: FakeAnalyserNode[] = [];
   public compressors: FakeCompressorNode[] = [];
+  public filters: FakeBiquadFilterNode[] = [];
   public sources: FakeNode[] = [];
   public closed = false;
 
@@ -92,6 +100,12 @@ class FakeAudioContext implements AudioContextLike {
   public createDynamicsCompressor(): DynamicsCompressorNodeLike {
     const node = new FakeCompressorNode();
     this.compressors.push(node);
+    return node;
+  }
+
+  public createBiquadFilter(): BiquadFilterNodeLike {
+    const node = new FakeBiquadFilterNode();
+    this.filters.push(node);
     return node;
   }
 
@@ -136,29 +150,59 @@ describe('AudioMixer', () => {
     expect(compressor.threshold.value).toBe(-18);
     expect(compressor.ratio.value).toBe(8);
 
-    // Peer bus: source[0] -> peerGain (gains[1]) -> analyser[0] -> masterGain
+    // Peer bus: source[0] -> hpf[0] -> peerGain (gains[1]) -> analyser[0] -> gateGain (gains[2]) -> masterGain
     const peerSource = ctx.sources[0]!;
+    const peerHpf = ctx.filters[0]!;
     const peerGain = ctx.gains[1]!;
     const peerAnalyser = ctx.analysers[0]!;
-    expect(peerSource.connectedTo).toContain(peerGain);
+    const peerGateGain = ctx.gains[2]!;
+    expect(peerHpf.type).toBe('highpass');
+    expect(peerHpf.frequency.value).toBe(120);
+    expect(peerSource.connectedTo).toContain(peerHpf);
+    expect(peerHpf.connectedTo).toContain(peerGain);
     expect(peerGain.connectedTo).toContain(peerAnalyser);
-    expect(peerAnalyser.connectedTo).toContain(masterGain);
+    expect(peerAnalyser.connectedTo).toContain(peerGateGain);
+    expect(peerGateGain.connectedTo).toContain(masterGain);
 
     // Hidden muted audio sink created for Chromium WebRTC pull workaround
     expect(sinks[0]!.muted).toBe(true);
     expect(sinks[0]!.srcObject).toBe(fakeStream);
 
-    // Sampling VU levels and compressor reduction
-    const snapshot = mixer.sampleLevels();
+    // Noise Gate keeps quiet speaker bleed closed until vocal crosses threshold
+    peerAnalyser.sampleValue = 0.01;
+    const quietSnap = mixer.sampleLevels(1000);
+    expect(quietSnap.levels.get('client-1')!.gateOpen).toBe(false);
+    expect(peerGateGain.gain.value).toBe(0);
+    expect(quietSnap.maxActiveRms).toBe(0);
+
+    // Vocal signal above threshold opens Noise Gate cleanly
+    peerAnalyser.sampleValue = 0.25;
+    const snapshot = mixer.sampleLevels(1100);
+    expect(snapshot.levels.get('client-1')!.gateOpen).toBe(true);
+    expect(peerGateGain.gain.value).toBe(1);
     expect(snapshot.levels.get('client-1')!.rms).toBeCloseTo(0.25, 4);
     expect(snapshot.maxActiveRms).toBeCloseTo(0.25, 4);
     expect(snapshot.compressorReductionDb).toBe(-3.5);
 
+    // Gate holds open briefly (< holdMs) then closes cleanly after holdMs
+    peerAnalyser.sampleValue = 0.005;
+    expect(mixer.sampleLevels(1200).levels.get('client-1')!.gateOpen).toBe(true);
+    expect(mixer.sampleLevels(1500).levels.get('client-1')!.gateOpen).toBe(false);
+    expect(peerGateGain.gain.value).toBe(0);
+
+    // Disabling Anti-Feedback DSP bypasses HPF (allpass) and opens Noise Gate
+    mixer.setAntiFeedbackDsp({ highPassEnabled: false, noiseGateEnabled: false });
+    expect(peerHpf.type).toBe('allpass');
+    expect(peerGateGain.gain.value).toBe(1);
+    mixer.setAntiFeedbackDsp({ highPassEnabled: true, noiseGateEnabled: true });
+
     // Host mute sets gain to 0 and zeroes reported VU/speech RMS
+    peerAnalyser.sampleValue = 0.25;
     mixer.setPeerMuted('client-1', true);
     expect(peerGain.gain.value).toBe(0);
-    const mutedSnapshot = mixer.sampleLevels();
+    const mutedSnapshot = mixer.sampleLevels(1600);
     expect(mutedSnapshot.levels.get('client-1')!.rms).toBe(0);
+    expect(mutedSnapshot.levels.get('client-1')!.gateOpen).toBe(false);
     expect(mutedSnapshot.maxActiveRms).toBe(0);
 
     // Unmute restores previous peer volume

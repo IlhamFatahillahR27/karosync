@@ -3,6 +3,8 @@ import {
   COMPRESSOR_PRESETS,
   MAX_COMPRESSOR_THRESHOLD_DB,
   MIN_COMPRESSOR_THRESHOLD_DB,
+  normalizeAntiFeedbackDsp,
+  type AntiFeedbackDspSettings,
   type BuiltInCompressorPresetId,
   type CompressorPresetId,
   type CompressorSettings,
@@ -12,9 +14,11 @@ import {
   buildMicJoinUrl,
   isValidHttpUrl,
   isValidWebSocketUrl,
+  loadAntiFeedbackDsp,
   loadCompressorConfig,
   loadDuckingEnabled,
   loadOperatorSettings,
+  saveAntiFeedbackDsp,
   saveCompressorConfig,
   saveDuckingEnabled,
   saveOperatorSettings,
@@ -79,6 +83,7 @@ export interface OperatorState {
   audioLatencyMs: number | null;
   compressorPreset: CompressorPresetId;
   compressor: CompressorSettings;
+  antiFeedback: AntiFeedbackDspSettings;
   settings: OperatorSettings;
   masterVocalVolume: number;
   youtube: YouTubePanelState;
@@ -112,8 +117,10 @@ export interface AudioMixerLike {
   setMasterVolume(volume: number): void;
   getCompressorSettings?(): CompressorSettings;
   setCompressorSettings?(partial: Partial<CompressorSettings>): CompressorSettings;
+  getAntiFeedbackDsp?(): AntiFeedbackDspSettings;
+  setAntiFeedbackDsp?(partial: Partial<AntiFeedbackDspSettings>): AntiFeedbackDspSettings;
   getOutputLatencyMs?(): number | null;
-  sampleLevels(): MixerSampleSnapshot;
+  sampleLevels(nowMs?: number): MixerSampleSnapshot;
   removePeer(clientId: string): void;
   dispose(): Promise<void>;
 }
@@ -127,6 +134,7 @@ export interface OperatorSessionDependencies {
   initialSettings?: OperatorSettings;
   initialDuckingEnabled?: boolean;
   initialCompressorConfig?: SavedCompressorConfig;
+  initialAntiFeedbackDsp?: Partial<AntiFeedbackDspSettings>;
   youtubePollIntervalMs?: number;
   createSignalingClient?: (options: HostSignalingOptions) => HostSignalingLike;
   testSignalingFn?: (url: string) => Promise<ConnectionTestResult>;
@@ -168,6 +176,10 @@ export class OperatorSession {
       savedCompressor.preset === 'custom'
         ? { ...COMPRESSOR_PRESETS.balanced, threshold: savedCompressor.thresholdDb }
         : { ...COMPRESSOR_PRESETS[savedCompressor.preset] };
+    const initialAntiFeedback = normalizeAntiFeedbackDsp(
+      deps.initialAntiFeedbackDsp,
+      loadAntiFeedbackDsp(),
+    );
 
     this.createSignalingClient =
       deps.createSignalingClient ?? ((options) => new HostSignalingClient(options));
@@ -178,6 +190,7 @@ export class OperatorSession {
       deps.audioMixer ??
       new AudioMixer({
         initialCompressorSettings,
+        initialAntiFeedbackDsp: initialAntiFeedback,
         onStateChange: (audioContextState) => {
           this.updateState({
             audioContextState,
@@ -198,6 +211,10 @@ export class OperatorSession {
       this.audioMixer.setCompressorSettings?.(initialCompressorSettings) ??
       this.audioMixer.getCompressorSettings?.() ??
       initialCompressorSettings;
+    const resolvedAntiFeedback =
+      this.audioMixer.setAntiFeedbackDsp?.(initialAntiFeedback) ??
+      this.audioMixer.getAntiFeedbackDsp?.() ??
+      initialAntiFeedback;
 
     this.state = {
       roomStatus: 'idle',
@@ -215,6 +232,7 @@ export class OperatorSession {
       audioLatencyMs: this.audioMixer.getOutputLatencyMs?.() ?? null,
       compressorPreset: savedCompressor.preset,
       compressor: resolvedCompressor,
+      antiFeedback: resolvedAntiFeedback,
       settings,
       masterVocalVolume: 1,
       youtube: {
@@ -442,13 +460,6 @@ export class OperatorSession {
           });
         },
 
-        onPingUpdate: (serverPingMs) => {
-          if (currentSeq !== this.sessionSeq) {
-            return;
-          }
-          this.updateState({ serverPingMs });
-        },
-
         onError: (_code, message) => {
           if (currentSeq !== this.sessionSeq) {
             return;
@@ -600,6 +611,30 @@ export class OperatorSession {
     });
   }
 
+  public setHighPassEnabled(enabled: boolean): void {
+    const applied =
+      this.audioMixer.setAntiFeedbackDsp?.({ highPassEnabled: enabled }) ??
+      normalizeAntiFeedbackDsp({ highPassEnabled: enabled }, this.state.antiFeedback);
+    saveAntiFeedbackDsp(applied);
+    this.updateState({ antiFeedback: applied });
+  }
+
+  public setNoiseGateEnabled(enabled: boolean): void {
+    const applied =
+      this.audioMixer.setAntiFeedbackDsp?.({ noiseGateEnabled: enabled }) ??
+      normalizeAntiFeedbackDsp({ noiseGateEnabled: enabled }, this.state.antiFeedback);
+    saveAntiFeedbackDsp(applied);
+    this.updateState({ antiFeedback: applied });
+  }
+
+  public setNoiseGateThreshold(threshold: number): void {
+    const applied =
+      this.audioMixer.setAntiFeedbackDsp?.({ noiseGateThreshold: threshold }) ??
+      normalizeAntiFeedbackDsp({ noiseGateThreshold: threshold }, this.state.antiFeedback);
+    saveAntiFeedbackDsp(applied);
+    this.updateState({ antiFeedback: applied });
+  }
+
   public setMasterVocalVolume(volume: number): void {
     const clamped = Math.min(1.5, Math.max(0, Number.isFinite(volume) ? volume : 1));
     void this.audioMixer.ensureRunning().then((audioContextState) => {
@@ -631,6 +666,37 @@ export class OperatorSession {
     this.audioMixer.setPeerMuted(clientId, nextMuted);
     this.webrtc?.setHostMute(clientId, nextMuted);
     this.patchPeer(clientId, { hostMuted: nextMuted });
+  }
+
+  public muteAllPeers(): void {
+    if (this.state.peers.length === 0) {
+      return;
+    }
+    const nextPeers = this.state.peers.map((peer) => {
+      if (!peer.hostMuted) {
+        this.audioMixer.setPeerMuted(peer.clientId, true);
+        this.webrtc?.setHostMute(peer.clientId, true);
+      }
+      return peer.hostMuted ? peer : { ...peer, hostMuted: true };
+    });
+    this.updateState({ peers: nextPeers });
+  }
+
+  public soloPeer(clientId: string): void {
+    const exists = this.state.peers.some((p) => p.clientId === clientId);
+    if (!exists) {
+      return;
+    }
+    const nextPeers = this.state.peers.map((peer) => {
+      const shouldMute = peer.clientId !== clientId;
+      if (peer.hostMuted !== shouldMute) {
+        this.audioMixer.setPeerMuted(peer.clientId, shouldMute);
+        this.webrtc?.setHostMute(peer.clientId, shouldMute);
+        return { ...peer, hostMuted: shouldMute };
+      }
+      return peer;
+    });
+    this.updateState({ peers: nextPeers });
   }
 
   public kickPeer(clientId: string): void {
@@ -730,7 +796,7 @@ export class OperatorSession {
   }
 
   public sampleMeters(nowMs = Date.now()): MixerSampleSnapshot {
-    const snapshot = this.audioMixer.sampleLevels();
+    const snapshot = this.audioMixer.sampleLevels(nowMs);
 
     const nextLatencyMs = this.audioMixer.getOutputLatencyMs?.() ?? null;
     if (nextLatencyMs !== this.state.audioLatencyMs) {

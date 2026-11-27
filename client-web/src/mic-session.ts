@@ -1,9 +1,11 @@
 import { AudioCapture, formatMicrophoneError } from './audio-capture';
 import {
+  DEFAULT_AUDIO_CAPTURE_MODE,
   isValidWebSocketUrl,
   normalizeRoomId,
   validateClientName,
   validateRoomId,
+  type AudioCaptureMode,
 } from './config';
 import type { RelayedSignalMessage } from './protocol';
 import { SignalingClient, type SignalingClientOptions } from './signaling-client';
@@ -23,6 +25,7 @@ export interface MicSessionState {
   clientId: string | null;
   clientName: string;
   signalingUrl: string;
+  audioMode: AudioCaptureMode;
   selfMuted: boolean;
   hostMuted: boolean;
   wakeLockState: WakeLockState;
@@ -35,10 +38,11 @@ export interface ConnectRequest {
   roomId: string;
   clientName: string;
   signalingUrl: string;
+  audioMode?: AudioCaptureMode;
 }
 
 export interface AudioCaptureLike {
-  start(callbacks?: { onTrackEnded?: () => void }): Promise<MediaStream>;
+  start(callbacks?: { mode?: AudioCaptureMode; onTrackEnded?: () => void }): Promise<MediaStream>;
   setMuted(muted: boolean): boolean;
   toggleMute(): boolean;
   isMuted(): boolean;
@@ -88,7 +92,12 @@ export class MicSession {
   private state: MicSessionState;
 
   constructor(
-    initial: { roomId: string; clientName: string; signalingUrl: string },
+    initial: {
+      roomId: string;
+      clientName: string;
+      signalingUrl: string;
+      audioMode?: AudioCaptureMode;
+    },
     deps: MicSessionDependencies = {},
   ) {
     this.audioCapture = deps.audioCapture ?? new AudioCapture();
@@ -113,6 +122,7 @@ export class MicSession {
       clientId: null,
       clientName: initial.clientName.trim(),
       signalingUrl: initial.signalingUrl,
+      audioMode: initial.audioMode ?? DEFAULT_AUDIO_CAPTURE_MODE,
       selfMuted: false,
       hostMuted: false,
       wakeLockState: this.wakeLock.getState(),
@@ -142,6 +152,7 @@ export class MicSession {
     const roomId = normalizeRoomId(request.roomId);
     const clientName = request.clientName.trim();
     const signalingUrl = request.signalingUrl.trim();
+    const audioMode = request.audioMode ?? this.state.audioMode;
 
     const roomError = validateRoomId(roomId);
     if (roomError) {
@@ -175,6 +186,7 @@ export class MicSession {
       clientId: null,
       clientName,
       signalingUrl,
+      audioMode,
       selfMuted: false,
       hostMuted: false,
       routeInfo: null,
@@ -185,6 +197,7 @@ export class MicSession {
     let stream: MediaStream;
     try {
       stream = await this.audioCapture.start({
+        mode: audioMode,
         onTrackEnded: () => {
           if (currentSeq !== this.sessionSeq) {
             return;
@@ -312,13 +325,6 @@ export class MicSession {
             `Sesi karaoke ditutup oleh Operator (${msg.reason}).`,
             'Room ditutup oleh Operator.',
           );
-        },
-
-        onPingUpdate: (serverPingMs) => {
-          if (currentSeq !== this.sessionSeq) {
-            return;
-          }
-          this.updateState({ serverPingMs });
         },
 
         onError: (_code, message) => {

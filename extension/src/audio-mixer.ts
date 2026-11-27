@@ -29,6 +29,12 @@ export interface DynamicsCompressorNodeLike extends AudioNodeLike {
   readonly reduction: number;
 }
 
+export interface BiquadFilterNodeLike extends AudioNodeLike {
+  type: BiquadFilterType;
+  readonly frequency: AudioParamLike;
+  readonly Q: AudioParamLike;
+}
+
 export interface AudioContextLike {
   readonly state: AudioContextState;
   readonly currentTime: number;
@@ -39,6 +45,7 @@ export interface AudioContextLike {
   createGain(): GainNodeLike;
   createAnalyser(): AnalyserNodeLike;
   createDynamicsCompressor(): DynamicsCompressorNodeLike;
+  createBiquadFilter?: () => BiquadFilterNodeLike;
   resume(): Promise<void>;
   close(): Promise<void>;
 }
@@ -86,6 +93,26 @@ export const DEFAULT_COMPRESSOR_SETTINGS: CompressorSettings = {
   ...COMPRESSOR_PRESETS[DEFAULT_COMPRESSOR_PRESET],
 };
 
+export interface AntiFeedbackDspSettings {
+  highPassEnabled: boolean;
+  highPassFrequencyHz: number;
+  noiseGateEnabled: boolean;
+  noiseGateThreshold: number;
+  noiseGateHoldMs: number;
+}
+
+export const MIN_NOISE_GATE_THRESHOLD = 0.01;
+export const MAX_NOISE_GATE_THRESHOLD = 0.12;
+export const DEFAULT_HIGH_PASS_HZ = 120;
+
+export const DEFAULT_ANTI_FEEDBACK_DSP: AntiFeedbackDspSettings = {
+  highPassEnabled: true,
+  highPassFrequencyHz: DEFAULT_HIGH_PASS_HZ,
+  noiseGateEnabled: true,
+  noiseGateThreshold: 0.035,
+  noiseGateHoldMs: 260,
+};
+
 export interface HiddenAudioElementLike {
   muted: boolean;
   autoplay: boolean;
@@ -98,6 +125,7 @@ export interface PeerLevelMetrics {
   rms: number;
   peak: number;
   normalized: number;
+  gateOpen: boolean;
 }
 
 export interface MixerSampleSnapshot {
@@ -110,14 +138,19 @@ export interface AudioMixerOptions {
   audioContextFactory?: () => AudioContextLike;
   audioElementFactory?: () => HiddenAudioElementLike;
   initialCompressorSettings?: Partial<CompressorSettings>;
+  initialAntiFeedbackDsp?: Partial<AntiFeedbackDspSettings>;
   onStateChange?: (state: AudioContextState) => void;
 }
 
 interface PeerChannel {
   clientId: string;
   source: AudioNodeLike;
+  highPassFilter: BiquadFilterNodeLike | null;
   gainNode: GainNodeLike;
   analyser: AnalyserNodeLike;
+  gateGainNode: GainNodeLike;
+  gateOpen: boolean;
+  lastAboveGateAtMs: number;
   floatBuffer: Float32Array<ArrayBuffer>;
   byteBuffer: Uint8Array<ArrayBuffer>;
   sinkElement: HiddenAudioElementLike | null;
@@ -131,6 +164,9 @@ interface PeerGainSetting {
 export const MIN_GAIN = 0;
 export const MAX_GAIN = 1.5;
 const RAMP_TIME_CONSTANT_SEC = 0.015;
+const GATE_ATTACK_TIME_CONSTANT_SEC = 0.003;
+const GATE_RELEASE_TIME_CONSTANT_SEC = 0.055;
+const GATE_HYSTERESIS_RATIO = 0.72;
 
 function clampRange(value: number, min: number, max: number, fallback: number): number {
   if (!Number.isFinite(value)) {
@@ -152,6 +188,40 @@ export function normalizeCompressorSettings(
   };
 }
 
+export function normalizeAntiFeedbackDsp(
+  partial?: Partial<AntiFeedbackDspSettings>,
+  base: AntiFeedbackDspSettings = DEFAULT_ANTI_FEEDBACK_DSP,
+): AntiFeedbackDspSettings {
+  return {
+    highPassEnabled:
+      typeof partial?.highPassEnabled === 'boolean'
+        ? partial.highPassEnabled
+        : base.highPassEnabled,
+    highPassFrequencyHz: clampRange(
+      partial?.highPassFrequencyHz ?? base.highPassFrequencyHz,
+      60,
+      250,
+      base.highPassFrequencyHz,
+    ),
+    noiseGateEnabled:
+      typeof partial?.noiseGateEnabled === 'boolean'
+        ? partial.noiseGateEnabled
+        : base.noiseGateEnabled,
+    noiseGateThreshold: clampRange(
+      partial?.noiseGateThreshold ?? base.noiseGateThreshold,
+      MIN_NOISE_GATE_THRESHOLD,
+      MAX_NOISE_GATE_THRESHOLD,
+      base.noiseGateThreshold,
+    ),
+    noiseGateHoldMs: clampRange(
+      partial?.noiseGateHoldMs ?? base.noiseGateHoldMs,
+      80,
+      1000,
+      base.noiseGateHoldMs,
+    ),
+  };
+}
+
 function clampGain(value: number): number {
   if (!Number.isFinite(value)) {
     return 1;
@@ -159,12 +229,27 @@ function clampGain(value: number): number {
   return Math.min(MAX_GAIN, Math.max(MIN_GAIN, value));
 }
 
-function setSmoothParam(param: AudioParamLike, value: number, currentTime: number): void {
+function setSmoothParam(
+  param: AudioParamLike,
+  value: number,
+  currentTime: number,
+  timeConstant = RAMP_TIME_CONSTANT_SEC,
+): void {
   if (typeof param.setTargetAtTime === 'function') {
-    param.setTargetAtTime(value, currentTime, RAMP_TIME_CONSTANT_SEC);
+    param.setTargetAtTime(value, currentTime, timeConstant);
   } else {
     param.value = value;
   }
+}
+
+function applyHighPassFilter(
+  filter: BiquadFilterNodeLike,
+  dsp: AntiFeedbackDspSettings,
+  currentTime: number,
+): void {
+  filter.type = dsp.highPassEnabled ? 'highpass' : 'allpass';
+  setSmoothParam(filter.frequency, dsp.highPassFrequencyHz, currentTime);
+  filter.Q.value = 0.707;
 }
 
 function defaultAudioContextFactory(): AudioContextLike {
@@ -194,6 +279,7 @@ export class AudioMixer {
   private masterGain: GainNodeLike | null = null;
   private compressor: DynamicsCompressorNodeLike | null = null;
   private compressorSettings: CompressorSettings;
+  private antiFeedbackDsp: AntiFeedbackDspSettings;
   private masterVolume = 1;
 
   private readonly channels = new Map<string, PeerChannel>();
@@ -203,11 +289,38 @@ export class AudioMixer {
     this.audioContextFactory = options.audioContextFactory ?? defaultAudioContextFactory;
     this.audioElementFactory = options.audioElementFactory ?? defaultAudioElementFactory;
     this.compressorSettings = normalizeCompressorSettings(options.initialCompressorSettings);
+    this.antiFeedbackDsp = normalizeAntiFeedbackDsp(options.initialAntiFeedbackDsp);
     this.onStateChange = options.onStateChange;
   }
 
   public getContextState(): AudioContextState {
     return this.ctx?.state ?? 'suspended';
+  }
+
+  public getAntiFeedbackDsp(): AntiFeedbackDspSettings {
+    return { ...this.antiFeedbackDsp };
+  }
+
+  public setAntiFeedbackDsp(partial: Partial<AntiFeedbackDspSettings>): AntiFeedbackDspSettings {
+    const next = normalizeAntiFeedbackDsp(partial, this.antiFeedbackDsp);
+    this.antiFeedbackDsp = next;
+
+    if (this.ctx) {
+      const now = this.ctx.currentTime;
+      for (const [clientId, channel] of this.channels.entries()) {
+        if (channel.highPassFilter) {
+          applyHighPassFilter(channel.highPassFilter, next, now);
+        }
+        const setting = this.peerSettings.get(clientId);
+        const isMuted = setting?.muted ?? false;
+        if (!isMuted && !next.noiseGateEnabled) {
+          channel.gateOpen = true;
+          setSmoothParam(channel.gateGainNode.gain, 1, now, GATE_ATTACK_TIME_CONSTANT_SEC);
+        }
+      }
+    }
+
+    return { ...next };
   }
 
   public getCompressorSettings(): CompressorSettings {
@@ -310,23 +423,41 @@ export class AudioMixer {
     }
 
     const source = ctx.createMediaStreamSource(stream);
+    const highPassFilter =
+      typeof ctx.createBiquadFilter === 'function' ? ctx.createBiquadFilter() : null;
     const gainNode = ctx.createGain();
     const analyser = ctx.createAnalyser();
+    const gateGainNode = ctx.createGain();
     analyser.fftSize = 256;
     analyser.smoothingTimeConstant = 0.75;
 
     const setting = this.getOrCreateSetting(clientId);
     gainNode.gain.value = setting.muted ? 0 : setting.volume;
 
-    source.connect(gainNode);
+    const initialGateOpen = !setting.muted && !this.antiFeedbackDsp.noiseGateEnabled;
+    gateGainNode.gain.value = initialGateOpen ? 1 : 0;
+
+    if (highPassFilter) {
+      applyHighPassFilter(highPassFilter, this.antiFeedbackDsp, ctx.currentTime);
+      source.connect(highPassFilter);
+      highPassFilter.connect(gainNode);
+    } else {
+      source.connect(gainNode);
+    }
+
     gainNode.connect(analyser);
-    analyser.connect(this.masterGain);
+    analyser.connect(gateGainNode);
+    gateGainNode.connect(this.masterGain);
 
     this.channels.set(clientId, {
       clientId,
       source,
+      highPassFilter,
       gainNode,
       analyser,
+      gateGainNode,
+      gateOpen: initialGateOpen,
+      lastAboveGateAtMs: 0,
       floatBuffer: new Float32Array(new ArrayBuffer(analyser.fftSize * 4)),
       byteBuffer: new Uint8Array(new ArrayBuffer(analyser.fftSize)),
       sinkElement,
@@ -375,7 +506,7 @@ export class AudioMixer {
     return this.channels.has(clientId);
   }
 
-  public sampleLevels(): MixerSampleSnapshot {
+  public sampleLevels(nowMs = Date.now()): MixerSampleSnapshot {
     const levels = new Map<string, PeerLevelMetrics>();
     let maxActiveRms = 0;
 
@@ -384,15 +515,49 @@ export class AudioMixer {
       const isMuted = setting?.muted ?? false;
 
       if (isMuted) {
-        levels.set(clientId, { rms: 0, peak: 0, normalized: 0 });
+        channel.gateOpen = false;
+        if (this.ctx) {
+          setSmoothParam(channel.gateGainNode.gain, 0, this.ctx.currentTime, RAMP_TIME_CONSTANT_SEC);
+        } else {
+          channel.gateGainNode.gain.value = 0;
+        }
+        levels.set(clientId, { rms: 0, peak: 0, normalized: 0, gateOpen: false });
         continue;
       }
 
       const { rms, peak } = this.readAnalyserMetrics(channel);
       const normalized = Math.min(1, Math.pow(rms * 3.8, 0.85));
-      levels.set(clientId, { rms, peak, normalized });
 
-      if (rms > maxActiveRms) {
+      if (!this.antiFeedbackDsp.noiseGateEnabled) {
+        channel.gateOpen = true;
+      } else {
+        const openThreshold = this.antiFeedbackDsp.noiseGateThreshold;
+        const closeThreshold = openThreshold * GATE_HYSTERESIS_RATIO;
+        if (rms >= openThreshold) {
+          channel.gateOpen = true;
+          channel.lastAboveGateAtMs = nowMs;
+        } else if (channel.gateOpen) {
+          if (rms >= closeThreshold) {
+            channel.lastAboveGateAtMs = nowMs;
+          } else if (nowMs - channel.lastAboveGateAtMs >= this.antiFeedbackDsp.noiseGateHoldMs) {
+            channel.gateOpen = false;
+          }
+        }
+      }
+
+      const gateTarget = channel.gateOpen ? 1 : 0;
+      const gateRamp = channel.gateOpen
+        ? GATE_ATTACK_TIME_CONSTANT_SEC
+        : GATE_RELEASE_TIME_CONSTANT_SEC;
+      if (this.ctx) {
+        setSmoothParam(channel.gateGainNode.gain, gateTarget, this.ctx.currentTime, gateRamp);
+      } else {
+        channel.gateGainNode.gain.value = gateTarget;
+      }
+
+      levels.set(clientId, { rms, peak, normalized, gateOpen: channel.gateOpen });
+
+      if (channel.gateOpen && rms > maxActiveRms) {
         maxActiveRms = rms;
       }
     }
@@ -467,12 +632,22 @@ export class AudioMixer {
       // Ignore disconnect errors
     }
     try {
+      existing.highPassFilter?.disconnect();
+    } catch {
+      // Ignore disconnect errors
+    }
+    try {
       existing.gainNode.disconnect();
     } catch {
       // Ignore disconnect errors
     }
     try {
       existing.analyser.disconnect();
+    } catch {
+      // Ignore disconnect errors
+    }
+    try {
+      existing.gateGainNode.disconnect();
     } catch {
       // Ignore disconnect errors
     }

@@ -60,7 +60,77 @@ export interface WebRtcSenderOptions {
   callbacks: WebRtcSenderCallbacks;
 }
 
-const DEFAULT_STATS_POLL_INTERVAL_MS = 3000;
+const DEFAULT_STATS_RETRY_DELAY_MS = 2000;
+
+export function preferLowLatencyOpusSdp(sdp: string | undefined): string | undefined {
+  if (!sdp) {
+    return sdp;
+  }
+  const opusMatch = sdp.match(/a=rtpmap:(\d+)\s+opus\/48000/i);
+  if (!opusMatch?.[1]) {
+    return sdp;
+  }
+  const payloadType = opusMatch[1];
+  const lineEnding = sdp.includes('\r\n') ? '\r\n' : '\n';
+  const lines = sdp.split(/\r?\n/);
+  const fmtpPrefix = `a=fmtp:${payloadType} `;
+  let hasFmtp = false;
+  let hasPtime = false;
+  let hasMinPtime = false;
+
+  const updated = lines.map((line) => {
+    if (line.startsWith('a=ptime:')) {
+      hasPtime = true;
+      return 'a=ptime:10';
+    }
+    if (line.startsWith('a=minptime:')) {
+      hasMinPtime = true;
+      return 'a=minptime:10';
+    }
+    if (line.startsWith(fmtpPrefix)) {
+      hasFmtp = true;
+      let params = line.slice(fmtpPrefix.length);
+      if (/minptime=\d+/i.test(params)) {
+        params = params.replace(/minptime=\d+/i, 'minptime=10');
+      } else {
+        params = `${params};minptime=10`;
+      }
+      if (/useinbandfec=\d+/i.test(params)) {
+        params = params.replace(/useinbandfec=\d+/i, 'useinbandfec=0');
+      } else {
+        params = `${params};useinbandfec=0`;
+      }
+      if (/stereo=\d+/i.test(params)) {
+        params = params.replace(/stereo=\d+/i, 'stereo=0');
+      } else {
+        params = `${params};stereo=0`;
+      }
+      return `${fmtpPrefix}${params}`;
+    }
+    return line;
+  });
+
+  if (!hasFmtp) {
+    const rtpmapIdx = updated.findIndex((line) =>
+      line.startsWith(`a=rtpmap:${payloadType} `),
+    );
+    if (rtpmapIdx >= 0) {
+      updated.splice(rtpmapIdx + 1, 0, `${fmtpPrefix}minptime=10;useinbandfec=0;stereo=0`);
+    }
+  }
+
+  if (!hasPtime || !hasMinPtime) {
+    const audioIdx = updated.findIndex((line) => line.startsWith('m=audio '));
+    if (audioIdx >= 0) {
+      const insertLines: string[] = [];
+      if (!hasMinPtime) insertLines.push('a=minptime:10');
+      if (!hasPtime) insertLines.push('a=ptime:10');
+      updated.splice(audioIdx + 1, 0, ...insertLines);
+    }
+  }
+
+  return updated.join(lineEnding);
+}
 
 function mapCandidateTypeLabel(candidateType: RouteInfo['candidateType']): string {
   switch (candidateType) {
@@ -109,13 +179,13 @@ export class WebRtcSender {
   private pendingIceCandidates: IceCandidatePayload[] = [];
   private lastReportedState: RTCPeerConnectionState = 'new';
   private selfMuted: boolean;
-  private statsTimer: ReturnType<typeof setInterval> | null = null;
+  private statsTimer: ReturnType<typeof setTimeout> | null = null;
   private closed = false;
 
   constructor(options: WebRtcSenderOptions) {
     this.callbacks = options.callbacks;
     this.selfMuted = options.initialSelfMuted ?? false;
-    this.statsPollIntervalMs = options.statsPollIntervalMs ?? DEFAULT_STATS_POLL_INTERVAL_MS;
+    this.statsPollIntervalMs = options.statsPollIntervalMs ?? DEFAULT_STATS_RETRY_DELAY_MS;
 
     const rtcConfig = options.rtcConfig ?? DEFAULT_RTC_CONFIG;
     const factory =
@@ -168,9 +238,10 @@ export class WebRtcSender {
       return;
     }
 
+    const optimizedSdp = preferLowLatencyOpusSdp(offer.sdp);
     const payload: SessionDescriptionPayload = {
       type: offer.type,
-      ...(offer.sdp !== undefined ? { sdp: offer.sdp } : {}),
+      ...(optimizedSdp !== undefined ? { sdp: optimizedSdp } : {}),
     };
 
     await this.pc.setLocalDescription(payload);
@@ -369,20 +440,17 @@ export class WebRtcSender {
       return;
     }
     this.stopStatsPolling();
-    void this.pollConnectionRoute();
-    this.statsTimer = setInterval(() => {
-      void this.pollConnectionRoute();
-    }, this.statsPollIntervalMs);
+    void this.pollConnectionRoute(true);
   }
 
   private stopStatsPolling(): void {
     if (this.statsTimer !== null) {
-      clearInterval(this.statsTimer);
+      clearTimeout(this.statsTimer);
       this.statsTimer = null;
     }
   }
 
-  private async pollConnectionRoute(): Promise<void> {
+  private async pollConnectionRoute(allowRetry = false): Promise<void> {
     if (this.closed || !this.pc || !this.callbacks.onRouteInfoChange) {
       return;
     }
@@ -410,6 +478,12 @@ export class WebRtcSender {
       });
 
       if (!activePair) {
+        if (allowRetry && !this.closed && this.statsPollIntervalMs > 0) {
+          this.statsTimer = setTimeout(() => {
+            this.statsTimer = null;
+            void this.pollConnectionRoute(false);
+          }, this.statsPollIntervalMs);
+        }
         return;
       }
 

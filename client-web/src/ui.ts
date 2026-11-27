@@ -1,6 +1,8 @@
 import {
   normalizeRoomId,
+  saveAudioMode,
   saveSingerName,
+  type AudioCaptureMode,
 } from './config';
 import type { ConnectionStatus, MicSession, MicSessionState } from './mic-session';
 import { MAX_CLIENT_NAME_LENGTH, ROOM_ID_LENGTH } from './protocol';
@@ -85,9 +87,13 @@ export class KaroSyncMicUI {
   private readonly roomQrBadge: HTMLElement;
   private readonly roomInput: HTMLInputElement;
   private readonly singerNameInput: HTMLInputElement;
+  private readonly audioModeAntiBtn: HTMLButtonElement;
+  private readonly audioModeRawBtn: HTMLButtonElement;
+  private readonly audioModeHintEl: HTMLElement;
   private readonly connectBtn: HTMLButtonElement;
   private readonly errorBox: HTMLElement;
   private readonly errorText: HTMLElement;
+  private selectedAudioMode: AudioCaptureMode;
 
   // Live stage elements
   private readonly stageSection: HTMLElement;
@@ -103,14 +109,15 @@ export class KaroSyncMicUI {
   private readonly hostMuteBanner: HTMLElement;
   private readonly wakeLockBadge: HTMLElement;
   private readonly routeBadge: HTMLElement;
-  private readonly pingBadge: HTMLElement;
   private readonly disconnectBtn: HTMLButtonElement;
+  private readonly footerNoteEl: HTMLElement;
 
   constructor(options: KaroSyncMicUIOptions) {
     this.session = options.session;
     this.defaultSignalingUrl = options.defaultSignalingUrl;
 
     const initial = this.session.getState();
+    this.selectedAudioMode = initial.audioMode;
 
     options.root.innerHTML = `
       <main class="safe-area-shell mx-auto flex min-h-dvh w-full max-w-md flex-col justify-between gap-5 px-4 py-5">
@@ -200,6 +207,29 @@ export class KaroSyncMicUI {
                 />
               </div>
 
+              <div>
+                <span class="block text-xs font-medium text-slate-300">Mode Audio Mikrofon</span>
+                <div class="mt-1.5 grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    data-el="mode-raw-vocal"
+                    class="rounded-2xl border px-3 py-2.5 text-left transition cursor-pointer"
+                  >
+                    <p class="text-xs font-bold">Low-Latency</p>
+                    <p class="mt-0.5 text-[10px] opacity-80">Super Cepat (Rekomendasi)</p>
+                  </button>
+                  <button
+                    type="button"
+                    data-el="mode-anti-feedback"
+                    class="rounded-2xl border px-3 py-2.5 text-left transition cursor-pointer"
+                  >
+                    <p class="text-xs font-bold">Anti-Dengung</p>
+                    <p class="mt-0.5 text-[10px] opacity-80">AEC (+delay ±100ms)</p>
+                  </button>
+                </div>
+                <p data-el="audio-mode-hint" class="mt-1.5 text-[11px] leading-snug text-slate-400"></p>
+              </div>
+
               <button
                 type="submit"
                 data-el="connect-btn"
@@ -271,12 +301,6 @@ export class KaroSyncMicUI {
               >
                 Menghubungkan P2P...
               </span>
-              <span
-                data-el="ping-badge"
-                class="inline-flex items-center gap-1.5 rounded-full border border-slate-700/80 bg-slate-800/80 px-2.5 py-1 font-mono font-medium text-slate-300"
-              >
-                Ping: --
-              </span>
             </div>
           </div>
 
@@ -303,8 +327,8 @@ export class KaroSyncMicUI {
           </div>
         </section>
 
-        <footer class="text-center text-[11px] text-slate-500">
-          Low-latency vocal capture • Tanpa echo cancellation
+        <footer data-el="footer-note" class="text-center text-[11px] text-slate-500">
+          Mode Anti-Dengung • Redam pantulan speaker ruangan
         </footer>
       </main>
     `;
@@ -323,6 +347,15 @@ export class KaroSyncMicUI {
       options.root,
       '[data-el="singer-name-input"]',
     ) as HTMLInputElement;
+    this.audioModeAntiBtn = this.requireEl(
+      options.root,
+      '[data-el="mode-anti-feedback"]',
+    ) as HTMLButtonElement;
+    this.audioModeRawBtn = this.requireEl(
+      options.root,
+      '[data-el="mode-raw-vocal"]',
+    ) as HTMLButtonElement;
+    this.audioModeHintEl = this.requireEl(options.root, '[data-el="audio-mode-hint"]');
     this.connectBtn = this.requireEl(
       options.root,
       '[data-el="connect-btn"]',
@@ -343,11 +376,11 @@ export class KaroSyncMicUI {
     this.hostMuteBanner = this.requireEl(options.root, '[data-el="host-mute-banner"]');
     this.wakeLockBadge = this.requireEl(options.root, '[data-el="wake-lock-badge"]');
     this.routeBadge = this.requireEl(options.root, '[data-el="route-badge"]');
-    this.pingBadge = this.requireEl(options.root, '[data-el="ping-badge"]');
     this.disconnectBtn = this.requireEl(
       options.root,
       '[data-el="disconnect-btn"]',
     ) as HTMLButtonElement;
+    this.footerNoteEl = this.requireEl(options.root, '[data-el="footer-note"]');
 
     const canvas = this.requireEl(
       options.root,
@@ -369,6 +402,7 @@ export class KaroSyncMicUI {
     // Hydrate initial inputs
     this.roomInput.value = initial.roomId;
     this.singerNameInput.value = initial.clientName;
+    this.renderAudioModeSelector();
     if (options.initialRoomFromQuery) {
       this.roomQrBadge.classList.remove('hidden');
     }
@@ -396,6 +430,18 @@ export class KaroSyncMicUI {
       }
     });
 
+    this.audioModeAntiBtn.addEventListener('click', () => {
+      this.selectedAudioMode = 'anti_feedback';
+      saveAudioMode('anti_feedback');
+      this.renderAudioModeSelector();
+    });
+
+    this.audioModeRawBtn.addEventListener('click', () => {
+      this.selectedAudioMode = 'raw_vocal';
+      saveAudioMode('raw_vocal');
+      this.renderAudioModeSelector();
+    });
+
     this.joinForm.addEventListener('submit', (event) => {
       event.preventDefault();
       const roomId = normalizeRoomId(this.roomInput.value);
@@ -403,11 +449,13 @@ export class KaroSyncMicUI {
 
       this.roomInput.value = roomId;
       saveSingerName(clientName);
+      saveAudioMode(this.selectedAudioMode);
 
       void this.session.connect({
         roomId,
         clientName,
         signalingUrl: this.defaultSignalingUrl,
+        audioMode: this.selectedAudioMode,
       });
     });
 
@@ -420,7 +468,29 @@ export class KaroSyncMicUI {
     });
   }
 
+  private renderAudioModeSelector(): void {
+    const isAntiFeedback = this.selectedAudioMode === 'anti_feedback';
+    const activeCls =
+      'rounded-2xl border border-emerald-400/70 bg-emerald-500/15 px-3 py-2.5 text-left text-emerald-100 transition cursor-pointer';
+    const inactiveCls =
+      'rounded-2xl border border-slate-800 bg-slate-950/70 px-3 py-2.5 text-left text-slate-400 transition hover:border-slate-700 hover:text-slate-200 cursor-pointer';
+
+    this.audioModeAntiBtn.className = isAntiFeedback ? activeCls : inactiveCls;
+    this.audioModeRawBtn.className = isAntiFeedback ? inactiveCls : activeCls;
+    this.audioModeAntiBtn.setAttribute('aria-pressed', String(isAntiFeedback));
+    this.audioModeRawBtn.setAttribute('aria-pressed', String(!isAntiFeedback));
+
+    this.audioModeHintEl.textContent = isAntiFeedback
+      ? 'Mengaktifkan Echo Cancellation di HP. Redam gema keras, tetapi menambah delay ±100 ms.'
+      : 'Latensi tercepat (~15 ms). Anti-dengung ditangani Noise Gate & High-Pass Filter di Operator (0 ms delay).';
+  }
+
   private render(state: MicSessionState): void {
+    const activeMode = state.status === 'disconnected' ? this.selectedAudioMode : state.audioMode;
+    this.footerNoteEl.textContent =
+      activeMode === 'anti_feedback'
+        ? 'Mode Anti-Dengung (AEC) • Redam gema keras (+delay)'
+        : 'Mode Low-Latency • Dekatkan HP 3–5 cm ke mulut';
     const meta = STATUS_META[state.status];
     this.statusPill.className = `inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold transition-colors ${meta.pillClass}`;
     this.statusDot.className = `h-2 w-2 rounded-full ${meta.dotClass}`;
@@ -523,25 +593,6 @@ export class KaroSyncMicUI {
       this.routeBadge.textContent = 'Menghubungkan P2P...';
       this.routeBadge.className =
         'inline-flex items-center gap-1.5 rounded-full border border-slate-700/80 bg-slate-800/80 px-2.5 py-1 font-medium text-slate-400';
-    }
-
-    // Dedicated Ping badge (prefers P2P WebRTC RTT, falls back to Signaling Server ping)
-    const p2pPing = state.routeInfo?.rttMs ?? null;
-    const effectivePing = p2pPing ?? state.serverPingMs;
-    if (effectivePing !== null) {
-      const sourceLabel = p2pPing !== null ? 'P2P' : 'Server';
-      this.pingBadge.textContent = `Ping: ${effectivePing} ms (${sourceLabel})`;
-      const toneClass =
-        effectivePing <= 30
-          ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
-          : effectivePing <= 80
-            ? 'border-amber-500/40 bg-amber-500/10 text-amber-300'
-            : 'border-rose-500/40 bg-rose-500/10 text-rose-300';
-      this.pingBadge.className = `inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 font-mono font-medium ${toneClass}`;
-    } else {
-      this.pingBadge.textContent = 'Ping: --';
-      this.pingBadge.className =
-        'inline-flex items-center gap-1.5 rounded-full border border-slate-700/80 bg-slate-800/80 px-2.5 py-1 font-mono font-medium text-slate-400';
     }
   }
 
